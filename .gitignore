@@ -1,0 +1,7 @@
+/build/
+/output/
+*.h264
+codec_output_1920x1080.jpg
+color_output_1920x1080.jpg
+output_640x360.jpg
+remap_output_1920x1080.nv12
