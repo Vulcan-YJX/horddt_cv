@@ -1,70 +1,64 @@
-# horddt_cv
+<p align="center"><strong>HORDDT CV</strong></p>
+<p align="center">
+  <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/License-GPLv3-blue.svg"/></a>
+  <img alt="language" src="https://img.shields.io/badge/language-C%2B%2B14-red.svg"/>
+  <img alt="platform" src="https://img.shields.io/badge/platform-Linux-lightgrey.svg"/>
+  <img alt="SDK" src="https://img.shields.io/badge/SDK-D--Robotics-orange.svg"/>
+</p>
 
-`horddt_cv` 是面向 D-Robotics multimedia SDK 的 C++ 图像处理封装，提供：
+<p align="center">
+  语言：<strong>中文</strong>
+</p>
 
-- `horddt_resize`：使用 PYM 对 NV12 图像进行硬件缩放；
-- `horddt_remap`：使用 GDC 对 NV12 图像进行硬件畸变矫正/坐标映射；
-- `horddt_color`：使用 libyuv 将 NV12/NV21 转换为 RGB/BGR（可选）；
-- `horddt_codec`：使用 Media Codec 硬件接口完成 NV12/JPEG/H.264 的单帧编解码。
+基于 D-Robotics multimedia SDK 的 C++ 图像处理封装，为 NV12/NV21 图像提供硬件
+缩放、GDC 畸变矫正、CPU 色彩转换以及硬件编解码能力。项目同时提供可以直接运行
+的 sample，方便验证 SDK 环境和替换为实际相机数据。
 
-## 目录结构
+---
 
-```text
-horddt_cv/
-├── CMakeLists.txt
-├── README.md
-├── data/                              # sample 输入数据
-│   ├── input_1920x1080.jpg           # 1920x1080 JPEG
-│   └── input_1920x1080.nv12          # 1920x1080、8-bit、半平面 NV12 原始数据
-├── include/
-│   ├── horddt_codec.hpp
-│   ├── horddt_color.hpp
-│   ├── horddt_remap.hpp
-│   └── horddt_resize.hpp
-├── src/
-│   ├── horddt_codec.cpp
-│   ├── horddt_color.cpp
-│   ├── horddt_remap.cpp
-│   └── horddt_resize.cpp
-└── samples/
-    ├── codec_sample.cpp
-    ├── color_convert_sample.cpp
-    ├── gdc_1920x1080.bin           # 与 sample 图像匹配的 GDC 标定文件
-    ├── remap_nv12_sample.cpp
-    └── resize_nv12_sample.cpp
-```
+## Basic Information 基本信息
 
-sample 默认从仓库根目录运行，输入图片统一位于 `data/`。sample 也支持通过命令行
-传入输入和输出路径，便于替换为相机或其他测试数据。
+- **项目名称**：`horddt_cv`
+- **开发语言**：C++14
+- **运行平台**：Linux + D-Robotics multimedia SDK
+- **默认 SDK 路径**：`/usr/hobot`
+- **默认 sample 工作目录**：仓库根目录
+- **默认测试分辨率**：`1920 x 1080`
+- **主要输入格式**：8-bit NV12；色彩模块额外支持 NV21
 
-## 输入数据格式
+项目包含以下模块：
 
-`data/input_1920x1080.nv12` 是一帧紧凑排列的 NV12 原始图像：
+| 模块 | 功能 | 实现方式 |
+| --- | --- | --- |
+| `horddt_resize` | NV12 图像缩放 | D-Robotics PYM 硬件加速 |
+| `horddt_remap` | NV12 畸变矫正/坐标映射 | D-Robotics GDC 硬件加速 |
+| `horddt_color` | NV12/NV21 转 RGB/BGR | libyuv CPU/SIMD 转换 |
+| `horddt_codec` | NV12/JPEG/H.264 单帧编解码 | D-Robotics Media Codec 硬件接口 |
 
-```text
-分辨率：1920 x 1080
-格式：8-bit NV12（Y plane + interleaved UV plane）
-文件大小：1920 x 1080 x 3 / 2 = 3,110,400 bytes
-```
+> 当前 sample 使用 1920x1080 输入。替换为其他分辨率时，需要同步修改 sample 中的
+> 宽高、stride 和对应的 GDC bin 配置。
 
-文件本身不包含 stride padding。sample 会把每一行的有效像素复制到 SDK 分配的
-带 stride buffer 中。使用其他 NV12 文件时，必须保证它的分辨率和 sample 配置一致，
-或者同时修改 sample 中的宽高和 buffer 处理逻辑。
+## Installation 安装
 
-## 环境要求
+### 依赖环境
 
-- D-Robotics multimedia SDK，默认安装路径为 `/usr/hobot`；
-- C++14 编译器和 CMake 3.10 或更高版本；
-- PYM/GDC/Media Codec 对应的 SDK 头文件和动态库；
-- `horddt_color`、`resize_nv12`、`color_convert` 还需要 libyuv 和 OpenCV。
+- CMake `3.10` 或更高版本；
+- 支持 C++14 的编译器；
+- D-Robotics multimedia SDK；
+- `horddt_color`、`resize_nv12`、`color_convert` 需要 libyuv 和 OpenCV。
 
-GDC 模块需要以下 SDK 组件：
+### D-Robotics SDK 依赖
+
+基础硬件图像处理模块需要：
 
 ```text
+头文件：
 hb_mem_mgr.h
 hbn_vpf_interface.h
 gdc_cfg.h
 gdc_bin_cfg.h
+
+动态库：
 libhbmem.so
 libvpf.so
 libvio.so
@@ -79,19 +73,28 @@ hb_media_error.h
 libmultimedia.so
 ```
 
-如果系统没有 libyuv 或 OpenCV 开发文件，CMake 会跳过色彩相关目标，但仍会构建
-`horddt_resize`、`horddt_remap`、`horddt_codec` 及对应的非色彩 sample。
+如果 SDK 安装在非默认路径，请在 CMake 配置时通过 `HOBOT_ROOT` 指定。系统没有
+libyuv 或 OpenCV 开发文件时，CMake 会跳过色彩相关模块和 sample，但仍然可以构建
+硬件 resize、remap 和 codec 模块。
 
-## 编译
+## Quick Start 快速开始
 
-在仓库根目录执行：
+### 1. 获取源码并进入目录
+
+```bash
+cd horddt_cv
+```
+
+### 2. 编译全部可用目标
+
+SDK 默认安装在 `/usr/hobot` 时：
 
 ```bash
 cmake -S . -B build
 cmake --build build -j
 ```
 
-如果 SDK 安装在其他位置：
+SDK 安装在其他目录时：
 
 ```bash
 cmake -S . -B build \
@@ -99,7 +102,7 @@ cmake -S . -B build \
 cmake --build build -j
 ```
 
-如果 libyuv 安装在自定义目录：
+libyuv 安装在自定义目录时：
 
 ```bash
 cmake -S . -B build \
@@ -108,78 +111,140 @@ cmake -S . -B build \
 cmake --build build -j
 ```
 
-不需要色彩模块时可以显式关闭：
+不需要色彩模块时：
 
 ```bash
-cmake -S . -B build -DHORDDT_BUILD_COLOR=OFF
+cmake -S . -B build \
+  -DHOBOT_ROOT=/path/to/hobot \
+  -DHORDDT_BUILD_COLOR=OFF
 cmake --build build -j
 ```
 
-构建成功后，常见目标如下：
+### 3. 查看生成目标
 
-| 目标 | 功能 | 依赖 |
+常见目标如下：
+
+| 目标 | 说明 | 依赖 |
 | --- | --- | --- |
-| `remap_nv12` | GDC 畸变矫正 | GDC/VPF SDK |
-| `codec_sample` | NV12/JPEG/H.264 硬件编解码 | Media Codec SDK |
-| `resize_nv12` | PYM 缩放后转 JPEG | PYM、libyuv、OpenCV |
+| `remap_nv12` | GDC 畸变矫正 sample | GDC/VPF SDK |
+| `codec_sample` | NV12/JPEG/H.264 编解码 sample | Media Codec SDK |
+| `resize_nv12` | PYM 缩放并转 JPEG | PYM、libyuv、OpenCV |
 | `color_convert` | NV12 转 JPEG | libyuv、OpenCV |
 
-## Samples 使用方法
+### 4. 准备输出目录
 
-所有 sample 都支持 `-h`/`--help`。不带参数时使用下面列出的默认路径；带参数时，
-输入文件和输出文件可以放在任意位置。输出目录不会自动创建，请提前执行
-`mkdir -p output`。
+sample 不会自动创建输出目录。使用自定义输出目录前，请先创建：
 
-### 1. NV12 转 JPEG：`color_convert`
+```bash
+mkdir -p output
+```
 
-默认将 `data/input_1920x1080.nv12` 转换为当前目录下的
-`color_output_1920x1080.jpg`：
+## Example 示例
+
+所有 sample 都支持 `-h` 和 `--help`。不带参数时使用默认输入；传入参数后，可以
+替换为任意路径下、格式匹配的测试数据。
+
+### 1. NV12 转 JPEG
+
+#### 功能概述
+
+使用 `horddt_color` 和 libyuv 将一帧 1920x1080 NV12 图像转换为 BGR，再使用
+OpenCV 编码为 JPEG。
+
+#### 默认命令
 
 ```bash
 ./build/color_convert
 ```
 
-查看帮助或指定路径：
+#### 默认输入输出
+
+```text
+输入：data/input_1920x1080.nv12
+输出：./color_output_1920x1080.jpg
+```
+
+#### 指定输入输出
+
+```bash
+./build/color_convert \
+  data/input_1920x1080.nv12 \
+  output/color.jpg
+```
+
+#### 参数格式
+
+```text
+color_convert [input.nv12 output.jpg]
+```
+
+查看帮助：
 
 ```bash
 ./build/color_convert --help
-./build/color_convert data/input_1920x1080.nv12 output/color.jpg
 ```
 
-### 2. PYM 缩放：`resize_nv12`
+---
 
-默认将 1920x1080 缩放为 640x360，并输出 `output_640x360.jpg`：
+### 2. PYM 图像缩放
+
+#### 功能概述
+
+使用 D-Robotics PYM 将 1920x1080 NV12 图像缩放到 640x360，然后转换为 JPEG。
+当前 sample 配置为固定输入和输出尺寸。
+
+#### 默认命令
 
 ```bash
 ./build/resize_nv12
 ```
 
-指定输入和输出：
-
-```bash
-./build/resize_nv12 data/input_1920x1080.nv12 output/resized.jpg
-```
-
-当前 sample 的输入尺寸固定为 1920x1080，输出尺寸固定为 640x360；若要使用其他
-尺寸，需要同步修改 `samples/resize_nv12_sample.cpp` 中的配置。
-
-### 3. GDC 畸变矫正：`remap_nv12`
-
-默认配置为：
+#### 默认输入输出
 
 ```text
 输入：data/input_1920x1080.nv12
-GDC bin：samples/gdc_1920x1080.bin
-输出：remap_output_1920x1080.nv12
+输出：./output_640x360.jpg
 ```
 
-运行：
+#### 指定输入输出
+
+```bash
+./build/resize_nv12 \
+  data/input_1920x1080.nv12 \
+  output/resized.jpg
+```
+
+#### 参数格式
+
+```text
+resize_nv12 [input.nv12 output.jpg]
+```
+
+> 当前 PYM 实现不支持放大，输出尺寸必须满足 SDK 支持的缩放比例。
+
+---
+
+### 3. GDC 畸变矫正
+
+#### 功能概述
+
+使用 D-Robotics GDC 对一帧 NV12 图像进行硬件畸变矫正或坐标映射。
+
+#### 默认命令
 
 ```bash
 ./build/remap_nv12
 ```
 
-也可以指定输入、GDC bin 和输出文件：
+#### 默认输入输出
+
+```text
+输入：data/input_1920x1080.nv12
+GDC bin：samples/gdc_1920x1080.bin
+输出：./remap_output_1920x1080.nv12
+```
+
+#### 指定输入、GDC bin 和输出
 
 ```bash
 ./build/remap_nv12 \
@@ -188,18 +253,40 @@ GDC bin：samples/gdc_1920x1080.bin
   output/remap.nv12
 ```
 
+#### 参数格式
+
+```text
+remap_nv12 [input.nv12 gdc.bin output.nv12]
+```
+
+#### GDC bin 注意事项
+
 GDC bin 不只是分辨率配置，还包含镜头和标定参数。实际部署时必须使用与摄像头、
-镜头、输入输出尺寸匹配的 bin，否则结果可能无效或节点初始化失败。
+镜头以及输入输出尺寸匹配的 bin，否则可能出现以下问题：
 
-### 4. 硬件编解码：`codec_sample`
+- GDC 节点初始化失败；
+- 输出图像无效或几何变形不正确；
+- 输入输出尺寸或 stride 校验失败。
 
-默认执行三种转换：
+---
+
+### 4. 硬件编解码
+
+#### 功能概述
+
+`codec_sample` 使用 D-Robotics Media Codec 完成三种转换：
 
 1. NV12 -> JPEG；
 2. NV12 -> Annex-B H.264；
 3. JPEG -> Annex-B H.264。
 
-默认输入和输出如下：
+#### 默认命令
+
+```bash
+./build/codec_sample
+```
+
+#### 默认输入输出
 
 ```text
 输入：data/input_1920x1080.nv12
@@ -209,29 +296,30 @@ GDC bin 不只是分辨率配置，还包含镜头和标定参数。实际部署
 输出：./jpeg_output_1920x1080.h264
 ```
 
-运行：
-
-```bash
-./build/codec_sample
-```
-
-指定两个输入文件和输出目录：
+#### 指定输入和输出目录
 
 ```bash
 mkdir -p output
+
 ./build/codec_sample \
   data/input_1920x1080.nv12 \
   data/input_1920x1080.jpg \
   output
 ```
 
-`codec_sample` 会在指定目录写入上述三个固定名称的输出文件。为了让 NV12->H.264
-和 JPEG->H.264 的单帧码流都能独立解码，sample 会在两次 H.264 转换之间关闭第一
-个 codec 对象，并创建新的 codec 对象。
+#### 参数格式
 
-## C++ 接口说明
+```text
+codec_sample [input.nv12 input.jpg output_dir]
+```
 
-### PYM 缩放
+`output_dir` 必须在运行前存在。程序会在该目录下生成固定名称的三个输出文件。
+为了让 NV12->H.264 和 JPEG->H.264 的单帧码流能够独立解码，sample 会在两次 H.264
+转换之间关闭第一个 codec 对象，并创建新的 codec 对象。
+
+## C++ API 说明
+
+### 1. PYM Resize API
 
 ```cpp
 horddt_resize::config cfg;
@@ -245,13 +333,14 @@ horddt_resize resizer(cfg);
 if (!resizer.is_initialized()) {
     return resizer.initialization_status();
 }
+
 int ret = resizer.resize(input_nv12_buffer, output_nv12_buffer);
 ```
 
-输入和输出均为调用者分配的 `hb_mem_graphic_buf_t`，格式必须是 NV12。当前 PYM
-实现不支持放大，输出尺寸必须满足 SDK 支持的缩放比例。
+输入和输出均为调用者分配的 `hb_mem_graphic_buf_t`，格式必须为 NV12。类不会释放
+调用者传入的图像 buffer。
 
-### GDC 畸变矫正
+### 2. GDC Remap API
 
 ```cpp
 horddt_remap::config cfg;
@@ -268,29 +357,40 @@ horddt_remap remapper(cfg);
 if (!remapper.is_initialized()) {
     return remapper.initialization_status();
 }
+
 int ret = remapper.remap(input_nv12_buffer, output_nv12_buffer);
 ```
 
-类只管理 GDC 节点和 bin buffer，不释放调用者传入的图像 buffer；类会处理内部
-GDC buffer 的 cache flush/invalidate，并按各自 stride 将结果复制到调用者的输出
-buffer。
+类只管理 GDC 节点和 bin buffer，不释放调用者传入的图像 buffer。类会处理 GDC 内部
+buffer 的 cache flush/invalidate，并按照输入输出 stride 复制结果。
 
-### 色彩转换
+### 3. Color Convert API
 
-`horddt_color` 使用 libyuv 在 CPU 上完成 NV12/NV21 到三通道图像的转换，OpenCV
-只负责承载输出 `cv::Mat`。支持：
+```cpp
+horddt_color color_converter;
+cv::Mat output_image;
+
+int ret = color_converter.convert(
+    input_nv12_buffer,
+    output_image,
+    horddt_color::output_format::bgr);
+```
+
+支持的转换关系：
 
 ```text
 NV12 -> BGR
 NV21 -> BGR
-NV12/NV21 -> RGB
+NV12 -> RGB
+NV21 -> RGB
 ```
 
-输入 buffer 必须提供 CPU 可访问的 `virt_addr[0]` 和 `virt_addr[1]`。如果输入由
-VIO、VSE、GDC、Codec 等硬件模块写入，调用者应在转换前按 buffer 缓存属性完成
-必要的 cache 同步。libyuv 是 CPU/SIMD 软件转换，不依赖 Nano2D。
+`horddt_color` 使用 libyuv 完成 CPU/SIMD 色彩转换，OpenCV 仅用于承载输出的
+`cv::Mat`。输入 buffer 必须提供 CPU 可访问的 `virt_addr[0]` 和 `virt_addr[1]`。
+如果输入由 VIO、VSE、GDC 或 Codec 等硬件模块写入，调用者应在转换前完成必要的
+cache 同步。
 
-### 硬件编解码
+### 4. Codec API
 
 ```cpp
 horddt_codec::config cfg;
@@ -304,13 +404,40 @@ cfg.timeout_ms = 2000;
 horddt_codec codec(cfg);
 std::vector<std::uint8_t> jpeg;
 std::vector<std::uint8_t> h264;
-codec.nv12_to_jpeg(input_nv12, jpeg);
-codec.nv12_to_h264(input_nv12, h264);
+
+codec.nv12_to_jpeg(input_nv12_buffer, jpeg);
+codec.nv12_to_h264(input_nv12_buffer, h264);
 codec.jpeg_to_h264(jpeg_data, jpeg_size, h264);
 ```
 
-JPEG/H.264 输出保存在 `std::vector<std::uint8_t>` 中，H.264 输出为 Annex-B 码流。
-类不会释放调用者传入的 `hb_mem_graphic_buf_t`。
+JPEG 和 H.264 输出保存在 `std::vector<std::uint8_t>` 中。H.264 输出为 Annex-B
+码流。类不会释放调用者传入的 `hb_mem_graphic_buf_t`。
+
+## Data 数据文件
+
+### 目录结构
+
+```text
+horddt_cv/
+├── data/
+│   ├── input_1920x1080.jpg
+│   └── input_1920x1080.nv12
+└── samples/
+    └── gdc_1920x1080.bin
+```
+
+### NV12 文件格式
+
+`data/input_1920x1080.nv12` 是一帧紧凑排列的 NV12 原始图像：
+
+```text
+分辨率：1920 x 1080
+格式：8-bit NV12（Y plane + interleaved UV plane）
+文件大小：1920 x 1080 x 3 / 2 = 3,110,400 bytes
+```
+
+文件本身不包含 stride padding。sample 会按行把有效像素复制到 SDK 分配的带 stride
+buffer 中。替换其他 NV12 文件时，必须保证文件分辨率和 sample 配置一致。
 
 ## GDC 实现参考
 
@@ -333,3 +460,78 @@ hbn_vnode_getframe
 hbn_vnode_releaseframe
 hbn_vnode_stop / close
 ```
+
+## FAQ 常见问题
+
+### 1. CMake 提示找不到 D-Robotics SDK
+
+确认 SDK 头文件和库文件已安装，并通过 `HOBOT_ROOT` 指向 SDK 根目录：
+
+```bash
+cmake -S . -B build -DHOBOT_ROOT=/path/to/hobot
+```
+
+SDK 根目录通常应包含 `include/` 和 `lib/` 子目录。
+
+### 2. CMake 跳过 `color_convert` 或 `resize_nv12`
+
+这通常表示缺少 libyuv、OpenCV 头文件或对应库文件。检查：
+
+```bash
+cmake -S . -B build \
+  -DHOBOT_ROOT=/path/to/hobot \
+  -DLIBYUV_ROOT=/path/to/libyuv
+```
+
+也可以关闭色彩模块，只编译硬件图像处理和编解码模块：
+
+```bash
+cmake -S . -B build -DHORDDT_BUILD_COLOR=OFF
+```
+
+### 3. Sample 找不到输入文件
+
+sample 默认从仓库根目录运行：
+
+```bash
+cd horddt_cv
+./build/color_convert
+```
+
+或者直接传入输入文件路径：
+
+```bash
+./build/color_convert /path/to/input.nv12 /path/to/output.jpg
+```
+
+### 4. GDC 初始化失败或输出结果异常
+
+检查以下项目：
+
+- GDC bin 是否与摄像头和镜头标定参数匹配；
+- GDC bin 是否与输入输出分辨率匹配；
+- 输入文件是否为正确的 NV12 格式；
+- 输入输出 stride 是否满足 SDK 要求；
+- 当前硬件是否支持对应的 GDC 配置。
+
+### 5. 输出目录不存在
+
+sample 不会自动创建输出目录，请提前执行：
+
+```bash
+mkdir -p output
+```
+
+## Contents 目录
+
+以下为项目目录说明：
+
+- [头文件接口](./include)
+  - [Resize API](./include/horddt_resize.hpp)
+  - [Remap API](./include/horddt_remap.hpp)
+  - [Color API](./include/horddt_color.hpp)
+  - [Codec API](./include/horddt_codec.hpp)
+- [源码实现](./src)
+- [Sample 程序](./samples)
+- [测试数据](./data)
+- [构建配置](./CMakeLists.txt)
