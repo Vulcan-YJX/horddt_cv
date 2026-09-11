@@ -102,6 +102,21 @@ target_include_directories(horddt_resize
 target_compile_options(horddt_resize PRIVATE -O2 -Wall -Wextra -Werror)
 target_link_libraries(horddt_resize PUBLIC ${HOBOT_LIBRARIES})
 
+# Multi-region NV12 hardware crop. All ROIs select the PYM SRC layer and are
+# emitted from one frame submission/output group.
+add_library(horddt_crop STATIC src/horddt_crop.cpp)
+target_include_directories(horddt_crop
+    PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${HOBOT_INCLUDE_DIR}"
+)
+target_compile_options(horddt_crop PRIVATE -O2 -Wall -Wextra -Werror)
+target_link_libraries(horddt_crop PUBLIC ${HOBOT_LIBRARIES})
+
+add_executable(crop_nv12 samples/crop_nv12_sample.cpp)
+target_compile_options(crop_nv12 PRIVATE -O2 -Wall -Wextra -Werror)
+target_link_libraries(crop_nv12 PRIVATE horddt_crop)
+
 # GDC distortion correction. The implementation uses the standalone feedback
 # mode from sample_gdc and the split GDC attributes from sample_pipeline.
 add_library(horddt_remap STATIC src/horddt_remap.cpp)

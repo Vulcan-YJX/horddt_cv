@@ -11,8 +11,8 @@
 </p>
 
 基于 D-Robotics multimedia SDK 的 C++ 图像处理封装，为 NV12/NV21 图像提供硬件
-缩放、GDC 畸变矫正、CPU 色彩转换以及硬件编解码能力。项目同时提供可以直接运行
-的 sample，方便验证 SDK 环境和替换为实际相机数据。
+缩放、多区域裁剪、GDC 畸变矫正、CPU 色彩转换以及硬件编解码能力。项目同时提供
+可以直接运行的 sample，方便验证 SDK 环境和替换为实际相机数据。
 
 ---
 
@@ -31,6 +31,7 @@
 | 模块 | 功能 | 实现方式 |
 | --- | --- | --- |
 | `horddt_resize` | NV12 图像缩放 | D-Robotics PYM 硬件加速 |
+| `horddt_crop` | NV12 单帧多区域裁剪 | D-Robotics PYM ROI 硬件加速 |
 | `horddt_remap` | NV12 畸变矫正/坐标映射 | D-Robotics GDC 硬件加速 |
 | `horddt_color` | NV12/NV21 转 RGB/BGR | libyuv CPU/SIMD 转换 |
 | `horddt_codec` | NV12/JPEG/H.264 单帧编解码 | D-Robotics Media Codec 硬件接口 |
@@ -55,6 +56,7 @@
 头文件：
 hb_mem_mgr.h
 hbn_vpf_interface.h
+hbn_pym_cfg.h
 gdc_cfg.h
 gdc_bin_cfg.h
 
@@ -136,6 +138,7 @@ cmake --build build -j
 
 | 目标 | 说明 | 依赖 |
 | --- | --- | --- |
+| `crop_nv12` | 一次提交将 1920x1080 NV12 从中间裁成左右两张图 | PYM/VPF SDK |
 | `remap_nv12` | GDC 畸变矫正 sample | GDC/VPF SDK |
 | `codec_sample` | NV12/JPEG/H.264 编解码 sample | Media Codec SDK |
 | `resize_nv12` | PYM 缩放并转 JPEG | PYM、libyuv、OpenCV |
@@ -238,7 +241,80 @@ resize_nv12 [input.nv12 output.jpg]
 
 ---
 
-### 3. GDC 畸变矫正
+### 3. PYM 硬件裁剪
+
+#### 功能概述
+
+`crop_nv12` 使用 `horddt_crop` 的两个 PYM DS ROI 输出通道。两个通道都选择原始
+SRC 层，一帧输入只提交一次，在垂直中线处裁成两张 960x1080 NV12 图像：
+
+```text
+左图：x=0,   y=0, width=960, height=1080
+右图：x=960, y=0, width=960, height=1080
+```
+
+#### 默认命令
+
+```bash
+./build/crop_nv12
+```
+
+#### 默认输入输出
+
+```text
+输入：data/input_1920x1080.nv12
+输出：./crop_left_960x1080.nv12
+输出：./crop_right_960x1080.nv12
+```
+
+#### 指定输入输出
+
+输出到仓库根目录时，可以直接执行：
+
+```bash
+./build/crop_nv12 \
+  data/input_1920x1080.nv12 \
+  crop_left.nv12 \
+  crop_right.nv12
+```
+
+执行成功后会输出：
+
+```text
+Crop complete:
+  left : crop_left.nv12 (960x1080)
+  right: crop_right.nv12 (960x1080)
+```
+
+如果需要输出到 `output/` 目录，程序不会自动创建目录，必须先执行：
+
+```bash
+mkdir -p output
+./build/crop_nv12 \
+  data/input_1920x1080.nv12 \
+  output/crop_left.nv12 \
+  output/crop_right.nv12
+```
+
+否则会出现：
+
+```text
+Cannot open output file 'output/crop_left.nv12': No such file or directory
+Hardware crop failed: -1
+```
+
+#### 参数格式
+
+```text
+crop_nv12 [input.nv12 left.nv12 right.nv12]
+```
+
+> NV12 裁剪区域的 x、y、width、height 必须为偶数，区域不能越界，且当前 PYM
+> 输出宽高不能小于 32x32。
+
+---
+
+### 4. GDC 畸变矫正
 
 #### 功能概述
 
@@ -284,7 +360,7 @@ GDC bin 不只是分辨率配置，还包含镜头和标定参数。实际部署
 
 ---
 
-### 4. 硬件编解码
+### 5. 硬件编解码
 
 #### 功能概述
 
@@ -333,7 +409,7 @@ codec_sample [input.nv12 input.jpg output_dir]
 
 ---
 
-### 5. 实时摄像头零中间拷贝流水线
+### 6. 实时摄像头零中间拷贝流水线
 
 `realtime_camera_pipeline` 使用 V4L2 的 `V4L2_MEMORY_DMABUF`，让摄像头直接写入
 预分配的 `hb_mem_graphic_buf_t`。一帧数据按如下顺序处理：
@@ -413,7 +489,7 @@ buffer。相比把 borrowed 指针直接放入异步队列，这种方式不会�
 验证 `external_frame_buf`/物理地址导入；项目没有在未知 SDK ABI 上强行开启该模式。
 
 
-### 6. autocube_media Camera/VIN 实时流水线
+### 7. autocube_media Camera/VIN 实时流水线
 
 `realtime_vin_camera_pipeline` 是第二种实时相机入口。它参考
 `autocube_media/autocube_gstcamera/src/stereo_camera_reader.cpp`，不经过
@@ -572,7 +648,32 @@ resizer.resize_borrowed(input_nv12_buffer,
 `enable_file_io=false` 可取消实时场景不需要的内部文件输入 buffer；
 `enable_extra_layers=false` 只启用到目标 channel 所需的金字塔层。
 
-### 2. GDC Remap API
+### 2. PYM Crop API
+
+```cpp
+horddt_crop::config cfg;
+cfg.input_width = 1920;
+cfg.input_height = 1080;
+cfg.regions = {
+    {0,   0, 960, 1080},
+    {960, 0, 960, 1080},
+};
+cfg.enable_file_io = false;
+
+horddt_crop cropper(cfg);
+int ret = cropper.crop_borrowed(input_nv12_buffer,
+    [&](const std::vector<hb_mem_graphic_buf_t> &crops) {
+        // crops[0]/crops[1] 只在回调期间有效，像素数据没有发生 CPU 拷贝。
+        return consume(crops);
+    });
+```
+
+每个 ROI 使用一个 PYM DS 输出通道，并且都直接选择 SRC 层。因此一次
+`hbn_vnode_sendframe()` 可得到所有裁剪结果。`crop_borrowed()` 是实时流水线的推荐接口；
+传入调用方 output buffer 的 `crop()` 会执行逐行复制，文件接口则将 stride 输出写成
+紧凑 NV12 文件。
+
+### 3. GDC Remap API
 
 ```cpp
 horddt_remap::config cfg;
@@ -598,7 +699,7 @@ stride 拷贝结果；实时流水线可改用 `remap_borrowed()`，在 GDC 内�
 下游。`sync_input_for_device=false` 仅适用于输入刚由 DMA 硬件产生且 CPU 未修改的情况；
 `sync_borrowed_output_for_cpu=false` 仅适用于下游仍是硬件消费者。
 
-### 3. Color Convert API
+### 4. Color Convert API
 
 ```cpp
 horddt_color color_converter;
@@ -624,7 +725,7 @@ NV21 -> RGB
 如果输入由 VIO、VSE、GDC 或 Codec 等硬件模块写入，调用者应在转换前完成必要的
 cache 同步。
 
-### 4. Codec API
+### 5. Codec API
 
 ```cpp
 horddt_codec::config cfg;
@@ -672,6 +773,7 @@ horddt_cv/
     ├── camera/
     │   ├── yx_s397_6010_sensor.c
     │   └── yx_s397_6010_sensor.h
+    ├── crop_nv12_sample.cpp
     ├── gdc_1920x1080.bin
     ├── realtime_camera_pipeline.cpp
     ├── realtime_vin_camera_pipeline.cpp
@@ -690,6 +792,18 @@ horddt_cv/
 
 文件本身不包含 stride padding。sample 会按行把有效像素复制到 SDK 分配的带 stride
 buffer 中。替换其他 NV12 文件时，必须保证文件分辨率和 sample 配置一致。
+
+## PYM Crop 实现参考
+
+`horddt_crop` 参考：
+
+```text
+multimedia_samples/sample_pym/sample_pym.c
+```
+
+实现复用 PYM M2M 生命周期，并通过 `ds_roi_sel[]`、`ds_roi_en` 和
+`ds_roi_info[]` 配置多路 SRC ROI。输出使用 `hbn_vnode_getframe_group()` 一次获取，
+借用接口在 callback 返回后统一调用 `hbn_vnode_releaseframe_group()` 归还硬件 buffer。
 
 ## GDC 实现参考
 
@@ -768,10 +882,24 @@ cd horddt_cv
 
 ### 5. 输出目录不存在
 
-sample 不会自动创建输出目录，请提前执行：
+包括 `crop_nv12` 在内的 sample 不会自动创建输出目录。以下命令中的
+`output/crop_left.nv12` 和 `output/crop_right.nv12` 只有在 `output/` 已存在时才能打开：
 
 ```bash
 mkdir -p output
+./build/crop_nv12 \
+  data/input_1920x1080.nv12 \
+  output/crop_left.nv12 \
+  output/crop_right.nv12
+```
+
+如果不希望创建目录，可以将输出文件直接写到当前目录：
+
+```bash
+./build/crop_nv12 \
+  data/input_1920x1080.nv12 \
+  crop_left.nv12 \
+  crop_right.nv12
 ```
 
 ## Contents 目录
@@ -780,6 +908,7 @@ mkdir -p output
 
 - [头文件接口](./include)
   - [Resize API](./include/horddt_resize.hpp)
+  - [Crop API](./include/horddt_crop.hpp)
   - [Remap API](./include/horddt_remap.hpp)
   - [Color API](./include/horddt_color.hpp)
   - [Codec API](./include/horddt_codec.hpp)
