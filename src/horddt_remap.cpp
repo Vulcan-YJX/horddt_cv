@@ -25,7 +25,6 @@ namespace {
 
 constexpr int kAutoAllocId = -1;
 constexpr int kChannelId = 0;
-constexpr int kOutputBufferCount = 3;
 constexpr std::uint32_t kGdcMagicNumber = 0x12345678U;
 
 std::uint32_t align16(std::uint32_t value)
@@ -205,6 +204,12 @@ struct horddt_remap::impl {
             std::fprintf(stderr, "GDC hardware id must not be negative.\n");
             return -1;
         }
+        if (cfg.output_buffer_count == 0U ||
+            cfg.output_buffer_count >
+                static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+            std::fprintf(stderr, "GDC output buffer count must be positive.\n");
+            return -1;
+        }
 
         configured_input_stride =
             cfg.input_stride == 0U ? align16(cfg.input_width) : cfg.input_stride;
@@ -351,7 +356,8 @@ struct horddt_remap::impl {
         }
 
         hbn_buf_alloc_attr_t alloc_attr{};
-        alloc_attr.buffers_num = kOutputBufferCount;
+        alloc_attr.buffers_num =
+            static_cast<int>(cfg.output_buffer_count);
         alloc_attr.is_contig = 1;
         alloc_attr.flags = HB_MEM_USAGE_CPU_READ_OFTEN |
                            HB_MEM_USAGE_CPU_WRITE_OFTEN |
@@ -449,7 +455,8 @@ struct horddt_remap::impl {
     }
 
     int process(const hb_mem_graphic_buf_t &input_buffer,
-                hb_mem_graphic_buf_t &output_buffer)
+                hb_mem_graphic_buf_t *output_buffer,
+                const horddt_remap::output_callback *callback)
     {
         if (!initialized) {
             std::fprintf(stderr, "horddt_remap is not initialized.\n");
@@ -470,15 +477,23 @@ struct horddt_remap::impl {
             return -1;
         }
 
-        ret = validate_nv12_buffer(output_buffer, cfg.output_width,
-                                   cfg.output_height, "Remap output buffer");
-        if (ret != 0) {
-            return ret;
+        if (output_buffer != nullptr) {
+            ret = validate_nv12_buffer(*output_buffer, cfg.output_width,
+                                       cfg.output_height,
+                                       "Remap output buffer");
+            if (ret != 0) {
+                return ret;
+            }
+        } else if (callback == nullptr || !(*callback)) {
+            std::fprintf(stderr, "GDC output callback must not be empty.\n");
+            return -1;
         }
 
-        ret = flush_nv12_buffer(input_buffer, "GDC input buffer");
-        if (ret != 0) {
-            return ret;
+        if (cfg.sync_input_for_device) {
+            ret = flush_nv12_buffer(input_buffer, "GDC input buffer");
+            if (ret != 0) {
+                return ret;
+            }
         }
 
         hbn_vnode_image_t input_frame{};
@@ -511,7 +526,25 @@ struct horddt_remap::impl {
         ret = validate_nv12_buffer(gdc_output.buffer, cfg.output_width,
                                    cfg.output_height, "GDC output buffer");
         if (ret == 0) {
-            ret = copy_output(gdc_output.buffer, output_buffer);
+            if (output_buffer != nullptr) {
+                ret = copy_output(gdc_output.buffer, *output_buffer);
+            } else {
+                if (cfg.sync_borrowed_output_for_cpu) {
+                    ret = invalidate_nv12_buffer(
+                        gdc_output.buffer, "GDC output buffer");
+                }
+                if (ret == 0) {
+                    try {
+                        ret = (*callback)(gdc_output.buffer);
+                    } catch (...) {
+                        // Always release the vnode-owned frame below, even if
+                        // downstream application code throws.
+                        std::fprintf(stderr,
+                                     "GDC output callback threw an exception.\n");
+                        ret = -1;
+                    }
+                }
+            }
         }
 
         const int release_ret =
@@ -576,7 +609,18 @@ horddt_remap::~horddt_remap()
 int horddt_remap::remap(const hb_mem_graphic_buf_t &input_buffer,
                         hb_mem_graphic_buf_t &output_buffer)
 {
-    return impl_ != nullptr ? impl_->process(input_buffer, output_buffer) : -1;
+    return impl_ != nullptr
+               ? impl_->process(input_buffer, &output_buffer, nullptr)
+               : -1;
+}
+
+int horddt_remap::remap_borrowed(
+    const hb_mem_graphic_buf_t &input_buffer,
+    const output_callback &callback)
+{
+    return impl_ != nullptr
+               ? impl_->process(input_buffer, nullptr, &callback)
+               : -1;
 }
 
 void horddt_remap::close()

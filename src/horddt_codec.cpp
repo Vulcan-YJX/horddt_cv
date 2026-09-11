@@ -20,8 +20,6 @@ extern "C" {
 
 namespace {
 
-constexpr std::uint32_t kCodecBufferCount = 3U;
-
 std::uint32_t align_up(std::uint32_t value, std::uint32_t alignment)
 {
     return (value + alignment - 1U) & ~(alignment - 1U);
@@ -132,6 +130,20 @@ struct horddt_codec::impl {
             std::fprintf(stderr, "Codec timeout must be positive.\n");
             return -1;
         }
+        if (!cfg.enable_jpeg_encoder && !cfg.enable_h264_encoder &&
+            !cfg.enable_jpeg_decoder) {
+            std::fprintf(stderr, "At least one codec context must be enabled.\n");
+            return -1;
+        }
+        if (cfg.frame_buffer_count == 0U ||
+            cfg.bitstream_buffer_count == 0U ||
+            cfg.frame_buffer_count >
+                static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
+            cfg.bitstream_buffer_count >
+                static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+            std::fprintf(stderr, "Codec buffer counts must be positive.\n");
+            return -1;
+        }
         const std::uint64_t frame_size =
             static_cast<std::uint64_t>(cfg.width) * cfg.height * 3U / 2U;
         if (frame_size > std::numeric_limits<std::uint32_t>::max() - 4095U) {
@@ -159,9 +171,11 @@ struct horddt_codec::impl {
         params.height = static_cast<std::int32_t>(cfg.height);
         params.pix_fmt = MC_PIXEL_FORMAT_NV12;
         params.bitstream_buf_size = align_up(frame_size(), 1024U);
-        params.frame_buf_count = kCodecBufferCount;
+        params.frame_buf_count =
+            static_cast<int>(cfg.frame_buffer_count);
         params.external_frame_buf = false;
-        params.bitstream_buf_count = kCodecBufferCount;
+        params.bitstream_buf_count =
+            static_cast<int>(cfg.bitstream_buffer_count);
         params.gop_params.gop_preset_idx = 1;
         params.rot_degree = MC_CCW_0;
         params.mir_direction = MC_DIRECTION_NONE;
@@ -220,8 +234,10 @@ struct horddt_codec::impl {
         params.feed_mode = MC_FEEDING_MODE_FRAME_SIZE;
         params.pix_fmt = MC_PIXEL_FORMAT_NV12;
         params.bitstream_buf_size = align_up(frame_size(), 1024U);
-        params.bitstream_buf_count = kCodecBufferCount;
-        params.frame_buf_count = kCodecBufferCount;
+        params.bitstream_buf_count =
+            static_cast<int>(cfg.bitstream_buffer_count);
+        params.frame_buf_count =
+            static_cast<int>(cfg.frame_buffer_count);
         params.jpeg_dec_config.frame_crop_enable = 0;
         params.jpeg_dec_config.rot_degree = MC_CCW_0;
         params.jpeg_dec_config.mir_direction = MC_DIRECTION_NONE;
@@ -296,20 +312,26 @@ struct horddt_codec::impl {
             return ret;
         }
 
-        ret = configure_encoder(jpeg_encoder, MEDIA_CODEC_ID_JPEG);
-        if (ret != 0) {
-            close_unlocked();
-            return ret;
+        if (cfg.enable_jpeg_encoder) {
+            ret = configure_encoder(jpeg_encoder, MEDIA_CODEC_ID_JPEG);
+            if (ret != 0) {
+                close_unlocked();
+                return ret;
+            }
         }
-        ret = configure_encoder(h264_encoder, MEDIA_CODEC_ID_H264);
-        if (ret != 0) {
-            close_unlocked();
-            return ret;
+        if (cfg.enable_h264_encoder) {
+            ret = configure_encoder(h264_encoder, MEDIA_CODEC_ID_H264);
+            if (ret != 0) {
+                close_unlocked();
+                return ret;
+            }
         }
-        ret = configure_jpeg_decoder(jpeg_decoder);
-        if (ret != 0) {
-            close_unlocked();
-            return ret;
+        if (cfg.enable_jpeg_decoder) {
+            ret = configure_jpeg_decoder(jpeg_decoder);
+            if (ret != 0) {
+                close_unlocked();
+                return ret;
+            }
         }
 
         initialized = true;
@@ -367,8 +389,9 @@ struct horddt_codec::impl {
         return 0;
     }
 
-    int collect_encoded_output(codec_state &encoder,
-                               std::vector<std::uint8_t> &encoded_data)
+    int collect_encoded_output_borrowed(
+        codec_state &encoder,
+        const horddt_codec::encoded_callback &callback)
     {
         media_codec_buffer_t output{};
         media_codec_output_buffer_info_t info{};
@@ -387,14 +410,20 @@ struct horddt_codec::impl {
             output.vstream_buf.size == 0U) {
             std::fprintf(stderr, "Codec returned an empty encoded stream.\n");
             result = -1;
+        } else if (!callback) {
+            std::fprintf(stderr, "Encoded output callback must not be empty.\n");
+            result = -1;
         } else {
             try {
-                const auto *begin = static_cast<const std::uint8_t *>(
-                    output.vstream_buf.vir_ptr);
-                encoded_data.assign(begin, begin + output.vstream_buf.size);
-            } catch (const std::bad_alloc &) {
+                result = callback(
+                    static_cast<const std::uint8_t *>(
+                        output.vstream_buf.vir_ptr),
+                    static_cast<std::size_t>(output.vstream_buf.size));
+            } catch (...) {
+                // The SDK-owned output must be queued even when user code
+                // fails, otherwise the encoder eventually runs out of buffers.
                 std::fprintf(stderr,
-                             "Cannot allocate encoded output vector.\n");
+                             "Encoded output callback threw an exception.\n");
                 result = -1;
             }
         }
@@ -412,6 +441,51 @@ struct horddt_codec::impl {
         return result;
     }
 
+    int collect_encoded_output(codec_state &encoder,
+                               std::vector<std::uint8_t> &encoded_data)
+    {
+        return collect_encoded_output_borrowed(
+            encoder,
+            [&encoded_data](const std::uint8_t *data, std::size_t size) {
+                try {
+                    encoded_data.assign(data, data + size);
+                } catch (const std::bad_alloc &) {
+                    std::fprintf(stderr,
+                                 "Cannot allocate encoded output vector.\n");
+                    return -1;
+                }
+                return 0;
+            });
+    }
+
+    int encode_nv12_borrowed(
+        codec_state &encoder,
+        const std::uint8_t *source_y,
+        const std::uint8_t *source_uv,
+        std::uint32_t source_stride,
+        const horddt_codec::encoded_callback &callback)
+    {
+        if (!encoder.initialized || !encoder.started) {
+            std::fprintf(stderr, "Requested codec encoder is disabled.\n");
+            return -1;
+        }
+        media_codec_buffer_t input{};
+        int ret = prepare_encoder_input(
+            encoder, input, source_y, source_uv, source_stride);
+        if (ret != 0) {
+            return ret;
+        }
+        ret = hb_mm_mc_queue_input_buffer(
+            &encoder.context, &input, cfg.timeout_ms);
+        if (ret != 0) {
+            std::fprintf(stderr,
+                         "hb_mm_mc_queue_input_buffer(codec=%d) failed: %d\n",
+                         encoder.context.codec_id, ret);
+            return ret;
+        }
+        return collect_encoded_output_borrowed(encoder, callback);
+    }
+
     int encode_nv12(codec_state &encoder,
                     const std::uint8_t *source_y,
                     const std::uint8_t *source_uv,
@@ -419,6 +493,10 @@ struct horddt_codec::impl {
                     std::vector<std::uint8_t> &encoded_data)
     {
         encoded_data.clear();
+        if (!encoder.initialized || !encoder.started) {
+            std::fprintf(stderr, "Requested codec encoder is disabled.\n");
+            return -1;
+        }
         media_codec_buffer_t input{};
         int ret = prepare_encoder_input(
             encoder, input, source_y, source_uv, source_stride);
@@ -454,11 +532,33 @@ struct horddt_codec::impl {
             static_cast<std::uint32_t>(input_buffer.stride), encoded_data);
     }
 
+    int encode_graphic_buffer_borrowed(
+        codec_state &encoder,
+        const hb_mem_graphic_buf_t &input_buffer,
+        const horddt_codec::encoded_callback &callback)
+    {
+        const int ret = validate_nv12_buffer(
+            input_buffer, cfg.width, cfg.height);
+        if (ret != 0) {
+            return ret;
+        }
+        return encode_nv12_borrowed(
+            encoder,
+            static_cast<const std::uint8_t *>(input_buffer.virt_addr[0]),
+            static_cast<const std::uint8_t *>(input_buffer.virt_addr[1]),
+            static_cast<std::uint32_t>(input_buffer.stride), callback);
+    }
+
     int decode_jpeg_and_encode_h264(const std::uint8_t *jpeg_data,
                                     std::size_t jpeg_size,
                                     std::vector<std::uint8_t> &h264_data)
     {
         h264_data.clear();
+        if (!jpeg_decoder.initialized || !h264_encoder.initialized) {
+            std::fprintf(stderr,
+                         "JPEG decoder or H.264 encoder is disabled.\n");
+            return -1;
+        }
         if (jpeg_data == nullptr || jpeg_size == 0U ||
             jpeg_size > std::numeric_limits<std::uint32_t>::max()) {
             std::fprintf(stderr, "Invalid JPEG input data.\n");
@@ -591,6 +691,18 @@ int horddt_codec::nv12_to_jpeg(
         impl_->jpeg_encoder, input_buffer, jpeg_data);
 }
 
+int horddt_codec::nv12_to_jpeg_borrowed(
+    const hb_mem_graphic_buf_t &input_buffer,
+    const encoded_callback &callback)
+{
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (!impl_->initialized) {
+        return impl_->initialization_result;
+    }
+    return impl_->encode_graphic_buffer_borrowed(
+        impl_->jpeg_encoder, input_buffer, callback);
+}
+
 int horddt_codec::nv12_to_h264(
     const hb_mem_graphic_buf_t &input_buffer,
     std::vector<std::uint8_t> &h264_data)
@@ -602,6 +714,18 @@ int horddt_codec::nv12_to_h264(
     }
     return impl_->encode_graphic_buffer(
         impl_->h264_encoder, input_buffer, h264_data);
+}
+
+int horddt_codec::nv12_to_h264_borrowed(
+    const hb_mem_graphic_buf_t &input_buffer,
+    const encoded_callback &callback)
+{
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (!impl_->initialized) {
+        return impl_->initialization_result;
+    }
+    return impl_->encode_graphic_buffer_borrowed(
+        impl_->h264_encoder, input_buffer, callback);
 }
 
 int horddt_codec::jpeg_to_h264(

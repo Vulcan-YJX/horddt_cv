@@ -65,6 +65,16 @@ libvio.so
 libcam.so
 ```
 
+`realtime_vin_camera_pipeline` 还会直接包含 Camera/VIN 配置接口：
+
+```text
+hb_camera_interface.h
+hb_deserial_interface.h
+hb_camera_data_config.h
+vin_cfg.h
+hbn_vpf_data_info.h
+```
+
 硬件编解码模块还需要：
 
 ```text
@@ -130,6 +140,9 @@ cmake --build build -j
 | `codec_sample` | NV12/JPEG/H.264 编解码 sample | Media Codec SDK |
 | `resize_nv12` | PYM 缩放并转 JPEG | PYM、libyuv、OpenCV |
 | `color_convert` | NV12 转 JPEG | libyuv、OpenCV |
+| `realtime_camera_pipeline` | V4L2 摄像头实时 GDC→PYM→Color/Codec | 全部模块、V4L2 DMABUF |
+| `realtime_vin_camera_pipeline` | GMSL/VIN 摄像头实时 GDC→PYM→Color/Codec | 全部模块、Camera/VIN SDK |
+| `realtime_vin_camera_pipeline_simple` | 固定默认参数的精简 GMSL/VIN 实时流水线 | 全部模块、Camera/VIN SDK |
 
 ### 4. 准备输出目录
 
@@ -141,8 +154,9 @@ mkdir -p output
 
 ## Example 示例
 
-所有 sample 都支持 `-h` 和 `--help`。不带参数时使用默认输入；传入参数后，可以
-替换为任意路径下、格式匹配的测试数据。
+所有 sample 都支持 `-h` 和 `--help`。不带参数时使用默认输入或默认配置；传入参数后
+可以替换为格式匹配的数据。`realtime_vin_camera_pipeline` 默认尝试从
+`samples/gdc_1088x2560.bin` 加载 GDC 标定文件，文件缺失时自动旁路 GDC。
 
 ### 1. NV12 转 JPEG
 
@@ -317,6 +331,213 @@ codec_sample [input.nv12 input.jpg output_dir]
 为了让 NV12->H.264 和 JPEG->H.264 的单帧码流能够独立解码，sample 会在两次 H.264
 转换之间关闭第一个 codec 对象，并创建新的 codec 对象。
 
+---
+
+### 5. 实时摄像头零中间拷贝流水线
+
+`realtime_camera_pipeline` 使用 V4L2 的 `V4L2_MEMORY_DMABUF`，让摄像头直接写入
+预分配的 `hb_mem_graphic_buf_t`。一帧数据按如下顺序处理：
+
+```text
+V4L2 camera -> hbmem NV12
+             -> GDC borrowed output
+             -> PYM borrowed 640x360 output
+                ├-> H.264 encoder -> borrowed bitstream -> file
+                ├-> JPEG encoder（按间隔）-> borrowed bitstream -> MJPEG file
+                └-> libyuv BGR（按间隔，复用 cv::Mat）
+```
+
+运行：
+
+```bash
+./build/realtime_camera_pipeline
+```
+
+完整参数：
+
+```text
+realtime_camera_pipeline \
+  [camera gdc.bin output.h264 snapshots.mjpg \
+   frame_limit color_every jpeg_every]
+```
+
+例如处理 300 帧，每帧执行颜色转换，每 30 帧保存一张 JPEG：
+
+```bash
+./build/realtime_camera_pipeline \
+  /dev/video0 \
+  samples/gdc_1920x1080.bin \
+  output/camera.h264 \
+  output/snapshots.mjpg \
+  300 1 30
+```
+
+其中 `frame_limit=0` 表示一直运行到 `Ctrl-C`；`color_every=0` 或 `jpeg_every=0`
+可以关闭对应分支。sample 默认要求摄像头支持单平面 NV12、streaming 和 DMABUF；若
+驱动只支持 `V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE`，需要将 capture 类改成 multiplanar
+API。GDC bin 必须与 1920x1080 摄像头和镜头标定匹配。
+
+该 sample 避免的拷贝包括：
+
+- 摄像头不再先采集到 mmap/userptr 再复制到 hbmem；
+- GDC 输出不复制到应用层 NV12 buffer；
+- PYM 输出不复制到应用层 NV12 buffer；
+- JPEG/H.264 码流不复制到临时 `std::vector`，直接在 SDK buffer 有效期内写出；
+- `cv::Mat` 在循环外创建并复用。
+
+调度上，H.264 在采集线程执行，Color 和 JPEG 使用两个常驻 worker 并行处理；主线程在
+PYM borrowed callback 返回前等待两个 worker，既共享同一份 PYM 输出，又不会越过
+SDK buffer 生命周期。通过 `color_every=0` 或 `jpeg_every=0` 关闭分支时，对应算子、
+输出文件和 worker 均不会创建。Camera 也会等所有持久化算子、文件和 worker 初始化
+完成后再执行 `VIDIOC_STREAMON`，避免启动阶段积压旧帧。
+
+sample 中采用的资源配置如下：
+
+| 环节 | 配置 | 目的 |
+| --- | --- | --- |
+| Camera | 4 个 DMABUF | 当前帧处理时仍给驱动保留采集队列，减少断流风险 |
+| GDC | `output_buffer_count=2` | 同步 borrowed 流水线所需的较小输出池 |
+| PYM | `output_buffer_count=2`、`feedback_buffer_count=2` | 降低常驻图像内存，同时保留双缓冲 |
+| PYM | `enable_file_io=false`、`enable_extra_layers=false` | 不分配文件输入 buffer，不生成未消费的额外层 |
+| Codec | H.264/JPEG 使用独立对象，各 2 个 frame/bitstream buffer | 两路编码可并行，且不初始化 JPEG decoder |
+| Cache | Camera→GDC、GDC→PYM 不做 CPU cache 同步；PYM 输出只 invalidate 一次 | 避免硬件链路上的重复 flush/invalidate |
+| CPU 分支 | `color_every`、`jpeg_every` | 降低 libyuv CPU 计算量和 JPEG 编码/写盘频率 |
+
+这里使用“帧内并行、帧间同步”的方式：一帧的所有消费者结束后才归还 PYM 和 Camera
+buffer。相比把 borrowed 指针直接放入异步队列，这种方式不会产生悬空引用，也不需要
+额外的引用计数和跨帧 buffer 池。若后续改为跨帧异步流水线，应把 GDC/PYM/Codec buffer
+数量提高到 3 或更多，并在最后一个消费者完成后再显式归还上游 buffer。
+
+目前 Media Codec SDK 接口仍由编码器管理自己的输入 frame buffer，因此
+`PYM -> codec` 内部仍有一次 NV12 拷贝。要彻底移除这一次，需要板端 SDK 明确支持并
+验证 `external_frame_buf`/物理地址导入；项目没有在未知 SDK ABI 上强行开启该模式。
+
+
+### 6. autocube_media Camera/VIN 实时流水线
+
+`realtime_vin_camera_pipeline` 是第二种实时相机入口。它参考
+`autocube_media/autocube_gstcamera/src/stereo_camera_reader.cpp`，不经过
+`/dev/video*`，而是直接使用 D-Robotics Camera、Deserializer、VIN 和 VFlow API：
+
+```text
+yx_s397_6010 (GMSL link 0)
+  -> hbn_camera_create + MAX96712 deserializer
+  -> VIN DDR output (VIN-owned hbmem NV12, 1088x2560)
+  -> GDC borrowed output (1088x2560)
+  -> PYM borrowed output (544x1280)
+     ├-> H.264 encoder -> borrowed bitstream -> file
+     ├-> JPEG encoder（按间隔）-> borrowed bitstream -> MJPEG file
+     └-> libyuv BGR（按间隔，复用 cv::Mat）
+```
+
+相机固定配置位于：
+
+```text
+samples/camera/yx_s397_6010_sensor.h
+samples/camera/yx_s397_6010_sensor.c
+```
+
+它保留了参考工程中的关键参数：`1088x2560@30`、YUV422 MIPI 输入、MIPI RX 4、
+MAX96712、GMSL link 0、VIN DDR 输出和 6 个连续 buffer。Camera/VIN 初始化顺序为：
+
+```text
+hbn_camera_create
+hbn_vnode_open(HB_VIN) + VIN attrs/buffer pool
+hbn_vflow_create + hbn_vflow_add_vnode
+hbn_deserial_create
+camera -> deserializer -> VIN attach
+hbn_vflow_start
+hbn_vnode_getframe / hbn_vnode_releaseframe
+```
+
+可以不带参数直接启动：
+
+```bash
+./build/realtime_vin_camera_pipeline
+```
+
+程序默认查找与该摄像头、标定以及 **1088x2560 输入/输出尺寸匹配** 的文件：
+
+```text
+samples/gdc_1088x2560.bin
+```
+
+如果默认文件不存在，sample 会打印警告并自动使用零拷贝的 `VIN -> PYM` 路径继续
+运行，避免因为仓库没有设备专用标定文件而退出；此时只是不执行畸变矫正。显式传入
+GDC 路径时，该文件是必需的，打开失败会立即退出。仓库内现有
+`samples/gdc_1920x1080.bin` 不匹配，不能用于这个 sample：
+
+```bash
+./build/realtime_vin_camera_pipeline /path/to/gdc_1088x2560.bin
+```
+
+完整参数：
+
+```text
+realtime_vin_camera_pipeline \
+  [gdc_1088x2560.bin output.h264 snapshots.mjpg \
+   frame_limit color_every jpeg_every]
+```
+
+例如处理 300 帧，每帧执行 Color 和 H.264，每 30 帧执行一次 JPEG：
+
+```bash
+./build/realtime_vin_camera_pipeline \
+  /path/to/gdc_1088x2560.bin \
+  output/vin_camera.h264 \
+  output/vin_snapshots.mjpg \
+  300 1 30
+```
+
+`frame_limit=0` 表示持续运行到 `Ctrl-C`；`color_every=0` 或 `jpeg_every=0` 可关闭对应
+分支。H.264 分支始终启用。存在有效的默认或显式 GDC bin 时，会调用 GDC、PYM、
+Color、JPEG 和 H.264 全部功能单元；默认 GDC 文件缺失时仅旁路 GDC。
+
+MAX96712 在 attach 阶段可能暂时返回 `-65672`。sample 现在与 `autocube_media` 一致：
+销毁本次未完成的 Camera/VIN pipeline，等待 3 秒后自动重试，不需要人工反复重启。
+`Ctrl-C` 可以终止重试。PYM 每层缩放范围按硬件要求使用 `(1/2, 1]`；
+`1088x2560 -> 544x1280` 会选择下一层 BL 的 1:1 输出，避免
+`hbn_vnode_set_attr` 返回 `-983049`。
+
+这个版本沿用 borrowed 生命周期：VIN frame 在 GDC、PYM、Color 和两个 Codec 分支
+全部完成后才调用 `hbn_vnode_releaseframe()`。因此 VIN→GDC→PYM 之间不创建应用层 NV12
+副本，GDC/PYM 输出也不会跨回调保存。PYM 输出的 cache 只在进入 CPU/Codec 消费回调前
+invalidate 一次。H.264 运行在采集线程，Color/JPEG 使用常驻 worker 帧内并行。
+
+> `autocube_media` 的双目展示流程还会把 1088x2560 图像顺时针旋转并切成左右两幅
+> 1280x1088 图像。`horddt_cv` 当前没有 rotate/split 算子，因此本 sample 对完整的
+> 1088x2560 VIN 帧执行 GDC，并缩放为 544x1280；它不会模拟双目旋转和切分。
+>
+> Camera/VIN/Deserializer 配置与板卡、线束、I2C 地址和 SDK ABI 强相关。请在目标
+> D-Robotics 板端确认 sensor 配置及 GDC bin，不能只在普通 Linux 主机验证。
+
+#### 精简版本
+
+`realtime_vin_camera_pipeline_simple` 使用
+Camera→VIN→CPU Resize→GDC→PYM→Codec/Color 处理路径，并删除命令行解析、GDC 文件
+存在性检查、输入图像格式检查、可选分支和并行 worker，适合直接阅读最基本的调用顺序。
+它固定使用：
+
+```text
+GDC:   samples/gdc_1920x1080.bin
+H.264: vin_camera_output.h264
+MJPEG: vin_camera_snapshots.mjpg
+```
+
+准备好仓库默认的 1920x1080 GDC 文件后，直接执行：
+
+```bash
+./build/realtime_vin_camera_pipeline_simple
+```
+
+程序最多尝试初始化 Camera/Deserializer/VIN 三次，两次重试之间等待 3 秒。初始化成功
+后，先使用 libyuv 将 VIN 的 1088x2560 NV12 resize 为 1920x1080，再使用仓库现有的
+`gdc_1920x1080.bin` 执行 GDC，随后由 PYM 缩放到 960x536，并执行 H.264、JPEG 和
+BGR 分支。这里使用 536 而不是 540，是因为 H.264/JPEG 要求输出高度按 8 对齐。
+JPEG 每 30 帧执行一次，程序运行到按下 `Ctrl-C`。由于 PYM 不支持把宽度
+从 1088 放大到 1920，第一段 resize 必须使用 CPU/libyuv；其 1920x1080 hbmem 输出
+buffer 只申请一次并循环复用。精简版仍保留必要的 SDK 返回值判断和 buffer 归还。
+
 ## C++ API 说明
 
 ### 1. PYM Resize API
@@ -338,7 +559,18 @@ int ret = resizer.resize(input_nv12_buffer, output_nv12_buffer);
 ```
 
 输入和输出均为调用者分配的 `hb_mem_graphic_buf_t`，格式必须为 NV12。类不会释放
-调用者传入的图像 buffer。
+调用者传入的图像 buffer。实时流水线可以使用借用接口，避免 PYM 输出拷贝：
+
+```cpp
+resizer.resize_borrowed(input_nv12_buffer,
+    [&](const hb_mem_graphic_buf_t &pym_output) {
+        // pym_output 只在回调期间有效，禁止保存或释放。
+        return consume(pym_output);
+    });
+```
+
+`enable_file_io=false` 可取消实时场景不需要的内部文件输入 buffer；
+`enable_extra_layers=false` 只启用到目标 channel 所需的金字塔层。
 
 ### 2. GDC Remap API
 
@@ -361,8 +593,10 @@ if (!remapper.is_initialized()) {
 int ret = remapper.remap(input_nv12_buffer, output_nv12_buffer);
 ```
 
-类只管理 GDC 节点和 bin buffer，不释放调用者传入的图像 buffer。类会处理 GDC 内部
-buffer 的 cache flush/invalidate，并按照输入输出 stride 复制结果。
+类只管理 GDC 节点和 bin buffer，不释放调用者传入的图像 buffer。复制式 API 会按照
+stride 拷贝结果；实时流水线可改用 `remap_borrowed()`，在 GDC 内部输出释放前直接调用
+下游。`sync_input_for_device=false` 仅适用于输入刚由 DMA 硬件产生且 CPU 未修改的情况；
+`sync_borrowed_output_for_cpu=false` 仅适用于下游仍是硬件消费者。
 
 ### 3. Color Convert API
 
@@ -411,7 +645,19 @@ codec.jpeg_to_h264(jpeg_data, jpeg_size, h264);
 ```
 
 JPEG 和 H.264 输出保存在 `std::vector<std::uint8_t>` 中。H.264 输出为 Annex-B
-码流。类不会释放调用者传入的 `hb_mem_graphic_buf_t`。
+码流。类不会释放调用者传入的 `hb_mem_graphic_buf_t`。实时输出建议使用
+`nv12_to_jpeg_borrowed()` / `nv12_to_h264_borrowed()`，直接消费 SDK 码流 buffer。
+还可以关闭未使用的 codec context，并调整 frame/bitstream buffer 数量：
+
+```cpp
+cfg.enable_jpeg_encoder = false;
+cfg.enable_h264_encoder = true;
+cfg.enable_jpeg_decoder = false;
+cfg.frame_buffer_count = 2;
+cfg.bitstream_buffer_count = 2;
+```
+
+借用的图像或码流指针都只在回调期间有效；回调返回后底层 buffer 会立即归还 SDK。
 
 ## Data 数据文件
 
@@ -423,7 +669,13 @@ horddt_cv/
 │   ├── input_1920x1080.jpg
 │   └── input_1920x1080.nv12
 └── samples/
-    └── gdc_1920x1080.bin
+    ├── camera/
+    │   ├── yx_s397_6010_sensor.c
+    │   └── yx_s397_6010_sensor.h
+    ├── gdc_1920x1080.bin
+    ├── realtime_camera_pipeline.cpp
+    ├── realtime_vin_camera_pipeline.cpp
+    └── realtime_vin_camera_pipeline_simple.cpp
 ```
 
 ### NV12 文件格式

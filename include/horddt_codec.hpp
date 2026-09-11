@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -15,6 +16,8 @@ extern "C" {
 // one H.264 encoder, and one JPEG decoder.
 class horddt_codec {
 public:
+    using encoded_callback =
+        std::function<int(const std::uint8_t *data, std::size_t size)>;
     struct config {
         std::uint32_t width = 0;
         std::uint32_t height = 0;
@@ -22,6 +25,14 @@ public:
         std::uint32_t bit_rate = 8192;
         int jpeg_quality = 90;
         int timeout_ms = 2000;
+
+        // Disable unused contexts to reduce reserved codec memory. The legacy
+        // defaults preserve all public conversion methods.
+        bool enable_jpeg_encoder = true;
+        bool enable_h264_encoder = true;
+        bool enable_jpeg_decoder = true;
+        std::uint32_t frame_buffer_count = 3;
+        std::uint32_t bitstream_buffer_count = 3;
         bool verbose = false;
     };
 
@@ -36,9 +47,17 @@ public:
     int nv12_to_jpeg(const hb_mem_graphic_buf_t &input_buffer,
                      std::vector<std::uint8_t> &jpeg_data);
 
+    // The encoded SDK buffer is borrowed and valid only during callback. This
+    // avoids copying the bitstream into a std::vector.
+    int nv12_to_jpeg_borrowed(const hb_mem_graphic_buf_t &input_buffer,
+                              const encoded_callback &callback);
+
     // Encodes one caller-owned NV12 graphic buffer to one Annex-B H.264 frame.
     int nv12_to_h264(const hb_mem_graphic_buf_t &input_buffer,
                      std::vector<std::uint8_t> &h264_data);
+
+    int nv12_to_h264_borrowed(const hb_mem_graphic_buf_t &input_buffer,
+                              const encoded_callback &callback);
 
     // Decodes one complete JPEG image to NV12 in hardware, then encodes that
     // NV12 frame to one Annex-B H.264 frame in hardware.

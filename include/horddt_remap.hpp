@@ -2,6 +2,7 @@
 #define HORDDT_CV_HORDDT_REMAP_HPP_
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -14,6 +15,8 @@ extern "C" {
 // the lens/camera calibration used to generate it.
 class horddt_remap {
 public:
+    using output_callback =
+        std::function<int(const hb_mem_graphic_buf_t &output_buffer)>;
     struct config {
         std::uint32_t input_width = 0;
         std::uint32_t input_height = 0;
@@ -27,6 +30,9 @@ public:
         std::string gdc_bin_path;
         int timeout_ms = 2000;
         int hw_id = 0;
+        std::uint32_t output_buffer_count = 2;
+        bool sync_input_for_device = true;
+        bool sync_borrowed_output_for_cpu = true;
         bool verbose = false;
     };
 
@@ -42,6 +48,12 @@ public:
     // by this class.
     int remap(const hb_mem_graphic_buf_t &input_buffer,
               hb_mem_graphic_buf_t &output_buffer);
+
+    // Zero-copy output path. The GDC-owned buffer is valid only for the
+    // callback duration. When sync_borrowed_output_for_cpu is true, its cache
+    // is invalidated before callback for CPU use.
+    int remap_borrowed(const hb_mem_graphic_buf_t &input_buffer,
+                       const output_callback &callback);
 
     // Stops the GDC vnode and releases resources owned by this class.
     void close();

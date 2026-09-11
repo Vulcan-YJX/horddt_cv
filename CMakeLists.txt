@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.10)
 
-project(horddt_cv LANGUAGES CXX)
+project(horddt_cv LANGUAGES C CXX)
+
+set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
 
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -189,10 +193,58 @@ if(HORDDT_BUILD_COLOR)
             -O2 -Wall -Wextra -Werror)
         target_link_libraries(color_convert PRIVATE
             horddt_color ${OpenCV_LIBS})
+
+        add_executable(realtime_camera_pipeline
+            samples/realtime_camera_pipeline.cpp)
+        target_include_directories(realtime_camera_pipeline PRIVATE
+            ${OpenCV_INCLUDE_DIRS})
+        target_compile_options(realtime_camera_pipeline PRIVATE
+            -O2 -Wall -Wextra -Werror)
+        target_link_libraries(realtime_camera_pipeline PRIVATE
+            horddt_remap
+            horddt_resize
+            horddt_color
+            horddt_codec
+            ${OpenCV_LIBS}
+            Threads::Threads)
+
+        add_executable(realtime_vin_camera_pipeline
+            samples/realtime_vin_camera_pipeline.cpp
+            samples/camera/yx_s397_6010_sensor.c)
+        target_include_directories(realtime_vin_camera_pipeline PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/samples/camera"
+            ${OpenCV_INCLUDE_DIRS})
+        target_compile_options(realtime_vin_camera_pipeline PRIVATE
+            -O2 -Wall -Wextra -Werror)
+        target_link_libraries(realtime_vin_camera_pipeline PRIVATE
+            horddt_remap
+            horddt_resize
+            horddt_color
+            horddt_codec
+            ${OpenCV_LIBS}
+            Threads::Threads)
+
+        add_executable(realtime_vin_camera_pipeline_simple
+            samples/realtime_vin_camera_pipeline_simple.cpp
+            samples/camera/yx_s397_6010_sensor.c)
+        target_include_directories(realtime_vin_camera_pipeline_simple PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/samples/camera"
+            ${OpenCV_INCLUDE_DIRS})
+        target_compile_options(realtime_vin_camera_pipeline_simple PRIVATE
+            -O2 -Wall -Wextra -Werror)
+        target_link_libraries(realtime_vin_camera_pipeline_simple PRIVATE
+            horddt_remap
+            horddt_resize
+            horddt_color
+            horddt_codec
+            ${OpenCV_LIBS}
+            Threads::Threads)
     else()
         message(WARNING
             "libyuv and/or OpenCV development files were not found. "
-            "Skipping horddt_color, resize_nv12, and color_convert; "
+            "Skipping horddt_color, resize_nv12, color_convert, and "
+            "realtime_camera_pipeline, realtime_vin_camera_pipeline, and "
+            "realtime_vin_camera_pipeline_simple; "
             "horddt_resize, horddt_remap, codec_sample, and remap_nv12 "
             "remain available. Set LIBYUV_ROOT if libyuv is installed "
             "outside the default paths."

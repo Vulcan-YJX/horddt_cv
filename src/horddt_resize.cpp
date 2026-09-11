@@ -59,9 +59,14 @@ int select_pym_channel(std::uint32_t input_width,
             break;
         }
 
+        // PYM DS scaling is (1/2, 1], not [1/2, 1].  When an output is
+        // exactly half of a layer, select the next BL layer at scale 1.0
+        // instead.  Passing an exact 1/2 ratio makes hbn_vnode_set_attr()
+        // reject the configuration on S100 (for example 1088x2560 to
+        // 544x1280).
         if (output_width <= layer_width && output_height <= layer_height &&
-            static_cast<std::uint64_t>(output_width) * 2U >= layer_width &&
-            static_cast<std::uint64_t>(output_height) * 2U >= layer_height) {
+            static_cast<std::uint64_t>(output_width) * 2U > layer_width &&
+            static_cast<std::uint64_t>(output_height) * 2U > layer_height) {
             return channel;
         }
     }
@@ -200,8 +205,8 @@ struct horddt_resize::impl {
             std::fprintf(
                 stderr,
                 "Unsupported PYM scale ratio: %ux%u -> %ux%u.\n"
-                "Each output dimension must be between 1/2 and 1 of the "
-                "same SRC/BL layer.\n",
+                "Each output dimension must be in (1/2, 1] of the same "
+                "SRC/BL layer.\n",
                 cfg.input_width, cfg.input_height,
                 cfg.output_width, cfg.output_height);
             return -1;
@@ -209,6 +214,15 @@ struct horddt_resize::impl {
 
         if (cfg.timeout_ms <= 0) {
             std::fprintf(stderr, "Timeout must be greater than zero.\n");
+            return -1;
+        }
+        if (cfg.output_buffer_count == 0U ||
+            cfg.feedback_buffer_count == 0U ||
+            cfg.output_buffer_count >
+                static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
+            cfg.feedback_buffer_count >
+                static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+            std::fprintf(stderr, "PYM buffer counts must be positive.\n");
             return -1;
         }
         return 0;
@@ -251,8 +265,10 @@ struct horddt_resize::impl {
 
         pym_cfg.hw_id = 0;
         pym_cfg.pym_mode = PYM_M2M_MODE;
-        pym_cfg.output_buf_num = 3;
-        pym_cfg.fb_buf_num = 2;
+        pym_cfg.output_buf_num =
+            static_cast<int>(cfg.output_buffer_count);
+        pym_cfg.fb_buf_num =
+            static_cast<int>(cfg.feedback_buffer_count);
         pym_cfg.layer_num_trans_next = 0;
         pym_cfg.layer_num_share_prev = -1;
         pym_cfg.out_buf_noinvalid = 1;
@@ -284,6 +300,9 @@ struct horddt_resize::impl {
 
             if (layer_width < kPymMinWidth ||
                 layer_height < kPymMinHeight) {
+                continue;
+            }
+            if (!cfg.enable_extra_layers && channel > pym_channel) {
                 continue;
             }
 
@@ -330,17 +349,17 @@ struct horddt_resize::impl {
 
         ret = hbn_vnode_set_attr(vnode, &pym_cfg);
         if (ret != 0) {
-            std::fprintf(stderr, "hbn_vnode_set_attr failed: %d\n", ret);
+            std::fprintf(stderr, "hbn_vnode_set_attr(PYM) failed: %d\n", ret);
             return ret;
         }
         ret = hbn_vnode_set_ichn_attr(vnode, 0, &pym_cfg);
         if (ret != 0) {
-            std::fprintf(stderr, "hbn_vnode_set_ichn_attr failed: %d\n", ret);
+            std::fprintf(stderr, "hbn_vnode_set_ichn_attr(PYM) failed: %d\n", ret);
             return ret;
         }
         ret = hbn_vnode_set_ochn_attr(vnode, 0, &pym_cfg);
         if (ret != 0) {
-            std::fprintf(stderr, "hbn_vnode_set_ochn_attr failed: %d\n", ret);
+            std::fprintf(stderr, "hbn_vnode_set_ochn_attr(PYM) failed: %d\n", ret);
             return ret;
         }
 
@@ -352,7 +371,7 @@ struct horddt_resize::impl {
         ret = hbn_vnode_set_ochn_buf_attr(vnode, 0, &alloc_attr);
         if (ret != 0) {
             std::fprintf(stderr,
-                         "hbn_vnode_set_ochn_buf_attr failed: %d\n", ret);
+                         "hbn_vnode_set_ochn_buf_attr(PYM) failed: %d\n", ret);
             return ret;
         }
 
@@ -391,7 +410,7 @@ struct horddt_resize::impl {
                 mem_opened = true;
             }
         }
-        if (ret == 0) {
+        if (ret == 0 && cfg.enable_file_io) {
             ret = allocate_input_buffer();
         }
         if (ret == 0) {
@@ -525,6 +544,30 @@ struct horddt_resize::impl {
         return 0;
     }
 
+    int invalidate_nv12_buffer(const hb_mem_graphic_buf_t &buffer,
+                               const char *name) const
+    {
+        const std::uint64_t y_bytes =
+            static_cast<std::uint64_t>(buffer.stride) * buffer.height;
+        const std::uint64_t uv_bytes = y_bytes / 2U;
+        int ret = hb_mem_invalidate_buf_with_vaddr(
+            static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(
+                buffer.virt_addr[0])), y_bytes);
+        if (ret != 0) {
+            std::fprintf(stderr, "Failed to invalidate %s Y plane: %d\n",
+                         name, ret);
+            return ret;
+        }
+        ret = hb_mem_invalidate_buf_with_vaddr(
+            static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(
+                buffer.virt_addr[1])), uv_bytes);
+        if (ret != 0) {
+            std::fprintf(stderr, "Failed to invalidate %s UV plane: %d\n",
+                         name, ret);
+        }
+        return ret;
+    }
+
     int copy_nv12_buffer(const hb_mem_graphic_buf_t &source,
                          hb_mem_graphic_buf_t &destination) const
     {
@@ -564,7 +607,8 @@ struct horddt_resize::impl {
 
     int run_pym(const hb_mem_graphic_buf_t &input_buffer,
                 hb_mem_graphic_buf_t *destination_buffer,
-                const std::string *destination_path)
+                const std::string *destination_path,
+                const horddt_resize::output_callback *callback)
     {
         if (!initialized) {
             std::fprintf(stderr, "horddt_resize is not initialized.\n");
@@ -586,14 +630,17 @@ struct horddt_resize::impl {
             if (ret != 0) {
                 return ret;
             }
-        } else if (destination_path == nullptr || destination_path->empty()) {
+        } else if (callback == nullptr &&
+                   (destination_path == nullptr || destination_path->empty())) {
             std::fprintf(stderr, "Output destination is not valid.\n");
             return -1;
         }
 
-        ret = flush_nv12_buffer(input_buffer, "input buffer");
-        if (ret != 0) {
-            return ret;
+        if (cfg.sync_input_for_device) {
+            ret = flush_nv12_buffer(input_buffer, "input buffer");
+            if (ret != 0) {
+                return ret;
+            }
         }
 
         hbn_vnode_image_t frame{};
@@ -632,8 +679,27 @@ struct horddt_resize::impl {
         if (ret == 0) {
             if (destination_buffer != nullptr) {
                 ret = copy_nv12_buffer(pym_output, *destination_buffer);
+            } else if (callback != nullptr) {
+                if (cfg.sync_borrowed_output_for_cpu) {
+                    ret = invalidate_nv12_buffer(
+                        pym_output, "PYM output buffer");
+                }
+                if (ret == 0) {
+                    try {
+                        ret = (*callback)(pym_output);
+                    } catch (...) {
+                        // Always release the vnode-owned output group below,
+                        // even if downstream application code throws.
+                        std::fprintf(stderr,
+                                     "PYM output callback threw an exception.\n");
+                        ret = -1;
+                    }
+                }
             } else {
-                ret = write_nv12_image(*destination_path, pym_output);
+                ret = invalidate_nv12_buffer(pym_output, "PYM output buffer");
+                if (ret == 0) {
+                    ret = write_nv12_image(*destination_path, pym_output);
+                }
             }
         }
 
@@ -653,7 +719,17 @@ struct horddt_resize::impl {
     int process_buffer(const hb_mem_graphic_buf_t &input_buffer,
                        hb_mem_graphic_buf_t &output_buffer)
     {
-        return run_pym(input_buffer, &output_buffer, nullptr);
+        return run_pym(input_buffer, &output_buffer, nullptr, nullptr);
+    }
+
+    int process_borrowed(const hb_mem_graphic_buf_t &input_buffer,
+                         const horddt_resize::output_callback &callback)
+    {
+        if (!callback) {
+            std::fprintf(stderr, "PYM output callback must not be empty.\n");
+            return -1;
+        }
+        return run_pym(input_buffer, nullptr, nullptr, &callback);
     }
 
     int process_file(const std::string &input_path,
@@ -662,6 +738,11 @@ struct horddt_resize::impl {
         if (!initialized) {
             std::fprintf(stderr, "horddt_resize is not initialized.\n");
             return initialization_result != 0 ? initialization_result : -1;
+        }
+        if (!cfg.enable_file_io || !input_allocated) {
+            std::fprintf(stderr,
+                         "File resize is disabled by config.enable_file_io.\n");
+            return -1;
         }
         if (input_path.empty() || output_path.empty()) {
             std::fprintf(stderr, "Input and output paths must not be empty.\n");
@@ -672,7 +753,7 @@ struct horddt_resize::impl {
         if (ret != 0) {
             return ret;
         }
-        return run_pym(input_image.buffer, nullptr, &output_path);
+        return run_pym(input_image.buffer, nullptr, &output_path, nullptr);
     }
 
     void release()
@@ -727,6 +808,13 @@ int horddt_resize::resize(const hb_mem_graphic_buf_t &input_buffer,
                           hb_mem_graphic_buf_t &output_buffer)
 {
     return impl_->process_buffer(input_buffer, output_buffer);
+}
+
+int horddt_resize::resize_borrowed(
+    const hb_mem_graphic_buf_t &input_buffer,
+    const output_callback &callback)
+{
+    return impl_ ? impl_->process_borrowed(input_buffer, callback) : -1;
 }
 
 void horddt_resize::close()
