@@ -6,19 +6,21 @@
  *
  * 数据流：
  *   yx_s397_6010 -> MAX96712 -> VIN 1088x2560
- *     -> libyuv NV12 resize 1920x1080 -> GDC 1920x1080 -> PYM 960x536
- *                                                        |- H.264
- *                                                        |- JPEG（每 30 帧）
- *                                                        `- BGR（每帧）
+ *     -> libyuv NV12 resize 1920x1080 -> GDC 1920x1080
+ *     -> Rotate 180° 1920x1080 -> PYM 960x536
+ *                                  |- H.264
+ *                                  |- JPEG（每 30 帧）
+ *                                  `- BGR（每帧）
  *
  * Camera/VIN 最多初始化三次。每次失败都会销毁未完成的链路，等待三秒后重试；
- * 三次全部失败才退出。GDC/PYM 使用 borrowed callback，回调返回前完成所有下游
- * 操作，不保存图像指针，也不创建额外的应用层 NV12 中间副本。
+ * 三次全部失败才退出。GDC/Rotate/PYM 使用 borrowed callback，回调返回前完成
+ * 所有下游操作，不保存图像指针，也不创建额外的应用层 NV12 中间副本。
  */
 #include "horddt_codec.hpp"
 #include "horddt_color.hpp"
 #include "horddt_remap.hpp"
 #include "horddt_resize.hpp"
+#include "horddt_rotate.hpp"
 
 #include <libyuv/scale.h>
 #include <opencv2/core.hpp>
@@ -367,7 +369,7 @@ int main() {
 
     // 精简版固定使用默认文件和参数，不做命令行、GDC 文件或帧格式检查。
     std::printf("Simple VIN pipeline: VIN 1088x2560 -> resize 1920x1080 "
-                "-> GDC(%s) -> PYM 960x536 -> %s + %s\n",
+                "-> GDC(%s) -> rotate 180 -> PYM 960x536 -> %s + %s\n",
                 kGdcPath, kH264Path, kMjpegPath);
 
     hbmem_runtime memory;
@@ -389,6 +391,18 @@ int main() {
         remap_cfg.output_buffer_count = 2U;
         remap_cfg.sync_input_for_device = false;
         remap_cfg.sync_borrowed_output_for_cpu = false;
+
+        horddt_rotate::config rotate_cfg;
+        rotate_cfg.input_width = kRemapWidth;
+        rotate_cfg.input_height = kRemapHeight;
+        rotate_cfg.rotation = horddt_rotate::angle::rotate_180;
+        rotate_cfg.input_stride = align16(kRemapWidth);
+        rotate_cfg.output_stride = align16(kRemapWidth);
+        rotate_cfg.timeout_ms = kTimeoutMs;
+        rotate_cfg.output_buffer_count = 2U;
+        // GDC output and Rotate output are passed directly between DMA engines.
+        rotate_cfg.sync_input_for_device = false;
+        rotate_cfg.sync_borrowed_output_for_cpu = false;
 
         horddt_resize::config resize_cfg;
         resize_cfg.input_width = kRemapWidth;
@@ -423,6 +437,7 @@ int main() {
         // 所有算子只构造一次，循环中复用其硬件上下文和 buffer 池。
         cpu_nv12_resize input_resize;
         horddt_remap remap(remap_cfg);
+        horddt_rotate rotate(rotate_cfg);
         horddt_resize resize(resize_cfg);
         horddt_color color;
         horddt_codec h264(h264_cfg);
@@ -445,6 +460,13 @@ int main() {
         if (input_resize.status() != 0) {
             std::fprintf(stderr, "Cannot allocate 1920x1080 resize buffer: %d\n",
                          input_resize.status());
+            std::fclose(mjpeg_file);
+            std::fclose(h264_file);
+            return 1;
+        }
+        if (!rotate.is_initialized()) {
+            std::fprintf(stderr, "Cannot initialize 180-degree rotation: %d\n",
+                         rotate.initialization_status());
             std::fclose(mjpeg_file);
             std::fclose(h264_file);
             return 1;
@@ -483,36 +505,45 @@ int main() {
                     process_ret = remap.remap_borrowed(
                         input_resize.output(),
                         [&](const hb_mem_graphic_buf_t &gdc_frame) {
-                            return resize.resize_borrowed(
+                            return rotate.rotate_borrowed(
                                 gdc_frame,
-                                [&](const hb_mem_graphic_buf_t &pym_frame) {
-                                    int ret = h264.nv12_to_h264_borrowed(
-                                        pym_frame,
-                                        [&](const std::uint8_t *data,
-                                            std::size_t size) {
-                                            return write_stream(h264_file,
+                                [&](const hb_mem_graphic_buf_t &rotated_frame) {
+                                    return resize.resize_borrowed(
+                                        rotated_frame,
+                                        [&](const hb_mem_graphic_buf_t &pym_frame) {
+                                            int ret =
+                                                h264.nv12_to_h264_borrowed(
+                                                    pym_frame,
+                                                    [&](const std::uint8_t *data,
+                                                        std::size_t size) {
+                                                        return write_stream(
+                                                            h264_file, data,
+                                                            size);
+                                                    });
+                                            if (ret != 0) {
+                                                return ret;
+                                            }
+
+                                            if (frame_count % kJpegEvery ==
+                                                0U) {
+                                                ret =
+                                                    jpeg.nv12_to_jpeg_borrowed(
+                                                        pym_frame,
+                                                        [&](const std::uint8_t *data,
+                                                            std::size_t size) {
+                                                            return write_stream(
+                                                                mjpeg_file,
                                                                 data, size);
+                                                        });
+                                                if (ret != 0) {
+                                                    return ret;
+                                                }
+                                            }
+
+                                            return color.convert(
+                                                pym_frame, bgr,
+                                                horddt_color::output_format::bgr);
                                         });
-                                    if (ret != 0) {
-                                        return ret;
-                                    }
-
-                                    if (frame_count % kJpegEvery == 0U) {
-                                        ret = jpeg.nv12_to_jpeg_borrowed(
-                                            pym_frame,
-                                            [&](const std::uint8_t *data,
-                                                std::size_t size) {
-                                                return write_stream(
-                                                    mjpeg_file, data, size);
-                                            });
-                                        if (ret != 0) {
-                                            return ret;
-                                        }
-                                    }
-
-                                    return color.convert(
-                                        pym_frame, bgr,
-                                        horddt_color::output_format::bgr);
                                 });
                         });
                 }

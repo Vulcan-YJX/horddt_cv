@@ -11,7 +11,7 @@
 </p>
 
 基于 D-Robotics multimedia SDK 的 C++ 图像处理封装，为 NV12/NV21 图像提供硬件
-缩放、多区域裁剪、GDC 畸变矫正、CPU 色彩转换以及硬件编解码能力。项目同时提供
+缩放、多区域裁剪、GDC 旋转/畸变矫正、CPU 色彩转换以及硬件编解码能力。项目同时提供
 可以直接运行的 sample，方便验证 SDK 环境和替换为实际相机数据。
 
 ---
@@ -32,12 +32,14 @@
 | --- | --- | --- |
 | `horddt_resize` | NV12 图像缩放 | D-Robotics PYM 硬件加速 |
 | `horddt_crop` | NV12 单帧多区域裁剪 | D-Robotics PYM ROI 硬件加速 |
+| `horddt_rotate` | NV12 旋转 90°/180°/270° | D-Robotics GDC Affine 硬件加速 |
 | `horddt_remap` | NV12 畸变矫正/坐标映射 | D-Robotics GDC 硬件加速 |
 | `horddt_color` | NV12/NV21 转 RGB/BGR | libyuv CPU/SIMD 转换 |
 | `horddt_codec` | NV12/JPEG/H.264 单帧编解码 | D-Robotics Media Codec 硬件接口 |
 
 > 当前 sample 使用 1920x1080 输入。替换为其他分辨率时，需要同步修改 sample 中的
-> 宽高、stride 和对应的 GDC bin 配置。
+> 宽高、stride 和对应的 GDC bin 配置。`horddt_rotate` 会在初始化时根据输入尺寸和
+> 旋转角度动态生成 Affine 配置，不需要外部 GDC bin；90°/270° 输出宽高互换。
 
 ## Installation 安装
 
@@ -140,6 +142,7 @@ cmake --build build -j
 | --- | --- | --- |
 | `crop_nv12` | 一次提交将 1920x1080 NV12 从中间裁成左右两张图 | PYM/VPF SDK |
 | `remap_nv12` | GDC 畸变矫正 sample | GDC/VPF SDK |
+| `rotate_sample` | GDC 旋转 90°/180°/270° sample | GDC/VPF SDK |
 | `codec_sample` | NV12/JPEG/H.264 编解码 sample | Media Codec SDK |
 | `resize_nv12` | PYM 缩放并转 JPEG | PYM、libyuv、OpenCV |
 | `color_convert` | NV12 转 JPEG | libyuv、OpenCV |
@@ -360,7 +363,46 @@ GDC bin 不只是分辨率配置，还包含镜头和标定参数。实际部署
 
 ---
 
-### 5. 硬件编解码
+### 5. GDC 图像旋转
+
+`rotate_sample` 使用 `horddt_rotate` 对固定为 1920x1080 的一帧 NV12 图像执行
+90°、180°或 270°硬件旋转。旋转配置在初始化时动态生成，不需要外部 GDC bin；
+90°和 270°旋转后的输出尺寸为 1080x1920，180°仍为 1920x1080。
+
+默认执行 180°旋转：
+
+```bash
+./build/rotate_sample
+```
+
+默认输入输出：
+
+```text
+输入：data/input_1920x1080.nv12
+输出：./rotate_output_1920x1080_180.nv12
+角度：180
+```
+
+指定输入、输出和角度：
+
+```bash
+./build/rotate_sample \
+  data/input_1920x1080.nv12 \
+  output/rotate_90.nv12 \
+  90
+```
+
+参数格式：
+
+```text
+rotate_sample [input.nv12 output.nv12 angle]
+```
+
+其中 `angle` 只能为 `90`、`180` 或 `270`。
+
+---
+
+### 6. 硬件编解码
 
 #### 功能概述
 
@@ -409,7 +451,7 @@ codec_sample [input.nv12 input.jpg output_dir]
 
 ---
 
-### 6. 实时摄像头零中间拷贝流水线
+### 7. 实时摄像头零中间拷贝流水线
 
 `realtime_camera_pipeline` 使用 V4L2 的 `V4L2_MEMORY_DMABUF`，让摄像头直接写入
 预分配的 `hb_mem_graphic_buf_t`。一帧数据按如下顺序处理：
@@ -489,7 +531,7 @@ buffer。相比把 borrowed 指针直接放入异步队列，这种方式不会�
 验证 `external_frame_buf`/物理地址导入；项目没有在未知 SDK ABI 上强行开启该模式。
 
 
-### 7. autocube_media Camera/VIN 实时流水线
+### 8. autocube_media Camera/VIN 实时流水线
 
 `realtime_vin_camera_pipeline` 是第二种实时相机入口。它参考
 `autocube_media/autocube_gstcamera/src/stereo_camera_reader.cpp`，不经过
@@ -581,8 +623,9 @@ MAX96712 在 attach 阶段可能暂时返回 `-65672`。sample 现在与 `autocu
 invalidate 一次。H.264 运行在采集线程，Color/JPEG 使用常驻 worker 帧内并行。
 
 > `autocube_media` 的双目展示流程还会把 1088x2560 图像顺时针旋转并切成左右两幅
-> 1280x1088 图像。`horddt_cv` 当前没有 rotate/split 算子，因此本 sample 对完整的
-> 1088x2560 VIN 帧执行 GDC，并缩放为 544x1280；它不会模拟双目旋转和切分。
+> 1280x1088 图像。完整版 `realtime_vin_camera_pipeline` 当前未接入 rotate/split
+> 阶段，因此仍对完整的 1088x2560 VIN 帧执行 GDC，并缩放为 544x1280；它不会模拟
+> 双目旋转和切分。
 >
 > Camera/VIN/Deserializer 配置与板卡、线束、I2C 地址和 SDK ABI 强相关。请在目标
 > D-Robotics 板端确认 sensor 配置及 GDC bin，不能只在普通 Linux 主机验证。
@@ -590,8 +633,9 @@ invalidate 一次。H.264 运行在采集线程，Color/JPEG 使用常驻 worker
 #### 精简版本
 
 `realtime_vin_camera_pipeline_simple` 使用
-Camera→VIN→CPU Resize→GDC→PYM→Codec/Color 处理路径，并删除命令行解析、GDC 文件
-存在性检查、输入图像格式检查、可选分支和并行 worker，适合直接阅读最基本的调用顺序。
+Camera→VIN→CPU Resize→GDC→Rotate 180°→PYM→Codec/Color 处理路径，并删除命令行解析、
+GDC 文件存在性检查、输入图像格式检查、可选分支和并行 worker，适合直接阅读最基本的
+调用顺序。
 它固定使用：
 
 ```text
@@ -608,8 +652,9 @@ MJPEG: vin_camera_snapshots.mjpg
 
 程序最多尝试初始化 Camera/Deserializer/VIN 三次，两次重试之间等待 3 秒。初始化成功
 后，先使用 libyuv 将 VIN 的 1088x2560 NV12 resize 为 1920x1080，再使用仓库现有的
-`gdc_1920x1080.bin` 执行 GDC，随后由 PYM 缩放到 960x536，并执行 H.264、JPEG 和
-BGR 分支。这里使用 536 而不是 540，是因为 H.264/JPEG 要求输出高度按 8 对齐。
+`gdc_1920x1080.bin` 执行 GDC，再以 borrowed 方式旋转 180°，随后由 PYM 缩放到
+960x536，并执行 H.264、JPEG 和 BGR 分支。这里使用 536 而不是 540，是因为
+H.264/JPEG 要求输出高度按 8 对齐。
 JPEG 每 30 帧执行一次，程序运行到按下 `Ctrl-C`。由于 PYM 不支持把宽度
 从 1088 放大到 1920，第一段 resize 必须使用 CPU/libyuv；其 1920x1080 hbmem 输出
 buffer 只申请一次并循环复用。精简版仍保留必要的 SDK 返回值判断和 buffer 归还。
@@ -699,7 +744,24 @@ stride 拷贝结果；实时流水线可改用 `remap_borrowed()`，在 GDC 内�
 下游。`sync_input_for_device=false` 仅适用于输入刚由 DMA 硬件产生且 CPU 未修改的情况；
 `sync_borrowed_output_for_cpu=false` 仅适用于下游仍是硬件消费者。
 
-### 4. Color Convert API
+### 4. GDC Rotate API
+
+```cpp
+horddt_rotate::config cfg;
+cfg.input_width = 1920;
+cfg.input_height = 1080;
+cfg.rotation = horddt_rotate::angle::rotate_180;
+cfg.input_stride = 1920;
+cfg.output_stride = 1920;
+
+horddt_rotate rotator(cfg);
+int ret = rotator.rotate(input_nv12_buffer, output_nv12_buffer);
+```
+
+90°和 270°会交换输出宽高，可通过 `output_width()` 和 `output_height()` 查询。
+实时流水线可使用 `rotate_borrowed()`，在 GDC 输出 buffer 释放前直接执行下游处理。
+
+### 5. Color Convert API
 
 ```cpp
 horddt_color color_converter;
@@ -725,7 +787,7 @@ NV21 -> RGB
 如果输入由 VIO、VSE、GDC 或 Codec 等硬件模块写入，调用者应在转换前完成必要的
 cache 同步。
 
-### 5. Codec API
+### 6. Codec API
 
 ```cpp
 horddt_codec::config cfg;
@@ -776,6 +838,8 @@ horddt_cv/
     ├── crop_nv12_sample.cpp
     ├── gdc_1920x1080.bin
     ├── realtime_camera_pipeline.cpp
+    ├── remap_nv12_sample.cpp
+    ├── rotate_sample.cpp
     ├── realtime_vin_camera_pipeline.cpp
     └── realtime_vin_camera_pipeline_simple.cpp
 ```

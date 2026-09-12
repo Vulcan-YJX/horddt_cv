@@ -133,6 +133,21 @@ add_executable(remap_nv12 samples/remap_nv12_sample.cpp)
 target_compile_options(remap_nv12 PRIVATE -O2 -Wall -Wextra -Werror)
 target_link_libraries(remap_nv12 PRIVATE horddt_remap)
 
+# Right-angle NV12 rotation. The GDC affine configuration is generated in
+# memory, following sample_gdc/6-gdc_transformation/Affine.json.
+add_library(horddt_rotate STATIC src/horddt_rotate.cpp)
+target_include_directories(horddt_rotate
+    PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${HOBOT_INCLUDE_DIR}"
+        "${GDC_INCLUDE_DIR}"
+)
+target_compile_options(horddt_rotate PRIVATE -O2 -Wall -Wextra -Werror)
+target_link_libraries(horddt_rotate PUBLIC ${HOBOT_LIBRARIES})
+
+add_executable(rotate_sample samples/rotate_sample.cpp)
+target_compile_options(rotate_sample PRIVATE -O2 -Wall -Wextra -Werror)
+target_link_libraries(rotate_sample PRIVATE horddt_rotate)
 
 add_library(horddt_codec STATIC src/horddt_codec.cpp)
 target_include_directories(horddt_codec
@@ -249,6 +264,7 @@ if(HORDDT_BUILD_COLOR)
             -O2 -Wall -Wextra -Werror)
         target_link_libraries(realtime_vin_camera_pipeline_simple PRIVATE
             horddt_remap
+            horddt_rotate
             horddt_resize
             horddt_color
             horddt_codec
@@ -260,7 +276,8 @@ if(HORDDT_BUILD_COLOR)
             "Skipping horddt_color, resize_nv12, color_convert, and "
             "realtime_camera_pipeline, realtime_vin_camera_pipeline, and "
             "realtime_vin_camera_pipeline_simple; "
-            "horddt_resize, horddt_remap, codec_sample, and remap_nv12 "
+            "horddt_resize, horddt_remap, horddt_rotate, codec_sample, "
+            "remap_nv12, and rotate_sample "
             "remain available. Set LIBYUV_ROOT if libyuv is installed "
             "outside the default paths."
         )
