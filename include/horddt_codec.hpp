@@ -23,6 +23,12 @@ public:
         std::uint32_t height = 0;
         std::uint32_t frame_rate = 30;
         std::uint32_t bit_rate = 8192;
+        // H.264 CBR virtual-buffer size. Smaller values reduce latency but can
+        // force large QP changes and visible smearing at low bitrates.
+        std::uint32_t h264_vbv_buffer_size = 20;
+        // Macroblock-level rate control improves bitrate precision but may
+        // produce visible block-to-block quality changes.
+        bool h264_mb_level_rc_enable = true;
         int jpeg_quality = 90;
         int timeout_ms = 2000;
 

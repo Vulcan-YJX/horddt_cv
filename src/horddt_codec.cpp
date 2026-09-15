@@ -117,9 +117,13 @@ struct horddt_codec::impl {
             std::fprintf(stderr, "NV12 codec dimensions must be even.\n");
             return -1;
         }
-        if (cfg.frame_rate == 0U || cfg.bit_rate == 0U) {
-            std::fprintf(stderr,
-                         "H.264 frame_rate and bit_rate must not be zero.\n");
+        if (cfg.frame_rate == 0U || cfg.bit_rate == 0U ||
+            cfg.h264_vbv_buffer_size == 0U ||
+            cfg.h264_vbv_buffer_size >
+                static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+            std::fprintf(
+                stderr,
+                "H.264 frame rate, bit rate, and VBV buffer size must be positive.\n");
             return -1;
         }
         if (cfg.jpeg_quality < 1 || cfg.jpeg_quality > 100) {
@@ -176,7 +180,12 @@ struct horddt_codec::impl {
         params.external_frame_buf = false;
         params.bitstream_buf_count =
             static_cast<int>(cfg.bitstream_buffer_count);
-        params.gop_params.gop_preset_idx = 1;
+        // GOP preset 1 is all-I encoding. At 640x480 each frame is then
+        // roughly an I-frame-sized access unit, so a nominal 1000 kbps CBR
+        // stream can actually exceed 4 Mbps. RTC needs a normal low-latency
+        // I/P prediction chain; preset 2 is the SDK-recommended I/P GOP.
+        params.gop_params.gop_preset_idx = 2;
+        params.gop_params.decoding_refresh_type = 2;
         params.rot_degree = MC_CCW_0;
         params.mir_direction = MC_DIRECTION_NONE;
         params.frame_cropping_flag = false;
@@ -194,13 +203,16 @@ struct horddt_codec::impl {
                 return ret;
             }
 
-            params.rc_params.h264_cbr_params.intra_period = 30;
+            // Generate an IDR approximately once per second.
+            params.rc_params.h264_cbr_params.intra_period = cfg.frame_rate;
             params.rc_params.h264_cbr_params.intra_qp = 30;
             params.rc_params.h264_cbr_params.bit_rate = cfg.bit_rate;
             params.rc_params.h264_cbr_params.frame_rate = cfg.frame_rate;
             params.rc_params.h264_cbr_params.initial_rc_qp = 20;
-            params.rc_params.h264_cbr_params.vbv_buffer_size = 20;
-            params.rc_params.h264_cbr_params.mb_level_rc_enalbe = 1;
+            params.rc_params.h264_cbr_params.vbv_buffer_size =
+                static_cast<int>(cfg.h264_vbv_buffer_size);
+            params.rc_params.h264_cbr_params.mb_level_rc_enalbe =
+                cfg.h264_mb_level_rc_enable ? 1U : 0U;
             params.rc_params.h264_cbr_params.min_qp_I = 8;
             params.rc_params.h264_cbr_params.max_qp_I = 50;
             params.rc_params.h264_cbr_params.min_qp_P = 8;

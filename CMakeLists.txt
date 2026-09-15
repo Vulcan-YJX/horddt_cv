@@ -43,6 +43,20 @@ if(NOT GDC_INCLUDE_DIR)
     )
 endif()
 
+# S100 STITCH configuration structures used by the hardware PIP compositor.
+find_path(STITCH_INCLUDE_DIR
+    NAMES hbn_sth_cfg.h hbn_stitch_cfg.h stitch_cfg.h
+    HINTS
+        "${HOBOT_ROOT}/include"
+        "${HOBOT_INCLUDE_DIR}"
+)
+if(NOT STITCH_INCLUDE_DIR)
+    message(FATAL_ERROR
+        "The D-Robotics STITCH configuration header was not found. "
+        "Install the S100/S600 Camsys development headers or set HOBOT_ROOT."
+    )
+endif()
+
 foreach(lib_name IN ITEMS vpf vio cam hbmem)
     string(TOUPPER "${lib_name}" lib_name_upper)
     find_library(HOBOT_${lib_name_upper}_LIBRARY
@@ -101,6 +115,18 @@ target_include_directories(horddt_resize
 )
 target_compile_options(horddt_resize PRIVATE -O2 -Wall -Wextra -Werror)
 target_link_libraries(horddt_resize PUBLIC ${HOBOT_LIBRARIES})
+
+# Hardware NV12 picture-in-picture composition. STITCH performs non-overlapping
+# ROI source-copy operations; resizing remains a separate PYM stage.
+add_library(horddt_pip STATIC src/horddt_pip.cpp)
+target_include_directories(horddt_pip
+    PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${HOBOT_INCLUDE_DIR}"
+        "${STITCH_INCLUDE_DIR}"
+)
+target_compile_options(horddt_pip PRIVATE -O2 -Wall -Wextra -Werror)
+target_link_libraries(horddt_pip PUBLIC ${HOBOT_LIBRARIES})
 
 # Multi-region NV12 hardware crop. All ROIs select the PYM SRC layer and are
 # emitted from one frame submission/output group.
@@ -190,7 +216,7 @@ if(HORDDT_BUILD_COLOR)
             "/usr/lib"
             "/usr/lib/aarch64-linux-gnu"
     )
-    find_package(OpenCV QUIET COMPONENTS core imgcodecs)
+    find_package(OpenCV QUIET COMPONENTS core imgcodecs imgproc)
 
     if(LIBYUV_INCLUDE_DIR AND LIBYUV_LIBRARY AND OpenCV_FOUND)
         add_library(horddt_color STATIC src/horddt_color.cpp)
@@ -223,6 +249,13 @@ if(HORDDT_BUILD_COLOR)
             -O2 -Wall -Wextra -Werror)
         target_link_libraries(color_convert PRIVATE
             horddt_color ${OpenCV_LIBS})
+
+        add_executable(pip_nv12 samples/pip_nv12_sample.cpp)
+        target_include_directories(pip_nv12 PRIVATE ${OpenCV_INCLUDE_DIRS})
+        target_compile_options(pip_nv12 PRIVATE
+            -O2 -Wall -Wextra -Werror)
+        target_link_libraries(pip_nv12 PRIVATE
+            horddt_resize horddt_pip horddt_color ${OpenCV_LIBS})
 
         add_executable(realtime_camera_pipeline
             samples/realtime_camera_pipeline.cpp)
@@ -273,10 +306,11 @@ if(HORDDT_BUILD_COLOR)
     else()
         message(WARNING
             "libyuv and/or OpenCV development files were not found. "
-            "Skipping horddt_color, resize_nv12, color_convert, and "
-            "realtime_camera_pipeline, realtime_vin_camera_pipeline, and "
+            "Skipping horddt_color, resize_nv12, color_convert, pip_nv12, "
+            "and realtime_camera_pipeline, realtime_vin_camera_pipeline, and "
             "realtime_vin_camera_pipeline_simple; "
-            "horddt_resize, horddt_remap, horddt_rotate, codec_sample, "
+            "horddt_resize, horddt_pip, horddt_remap, horddt_rotate, "
+            "codec_sample, "
             "remap_nv12, and rotate_sample "
             "remain available. Set LIBYUV_ROOT if libyuv is installed "
             "outside the default paths."

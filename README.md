@@ -11,8 +11,8 @@
 </p>
 
 基于 D-Robotics multimedia SDK 的 C++ 图像处理封装，为 NV12/NV21 图像提供硬件
-缩放、多区域裁剪、GDC 旋转/畸变矫正、CPU 色彩转换以及硬件编解码能力。项目同时提供
-可以直接运行的 sample，方便验证 SDK 环境和替换为实际相机数据。
+缩放、多区域裁剪、STITCH 画中画、GDC 旋转/畸变矫正、CPU 色彩转换以及硬件编解码能力。
+项目同时提供可以直接运行的 sample，方便验证 SDK 环境和替换为实际相机数据。
 
 ---
 
@@ -31,6 +31,7 @@
 | 模块 | 功能 | 实现方式 |
 | --- | --- | --- |
 | `horddt_resize` | NV12 图像缩放 | D-Robotics PYM 硬件加速 |
+| `horddt_pip` | 两张 NV12 图像画中画合成 | D-Robotics STITCH 硬件加速 |
 | `horddt_crop` | NV12 单帧多区域裁剪 | D-Robotics PYM ROI 硬件加速 |
 | `horddt_rotate` | NV12 旋转 90°/180°/270° | D-Robotics GDC Affine 硬件加速 |
 | `horddt_remap` | NV12 畸变矫正/坐标映射 | D-Robotics GDC 硬件加速 |
@@ -59,6 +60,7 @@
 hb_mem_mgr.h
 hbn_vpf_interface.h
 hbn_pym_cfg.h
+hbn_sth_cfg.h（部分 SDK 中为 hbn_stitch_cfg.h/stitch_cfg.h）
 gdc_cfg.h
 gdc_bin_cfg.h
 
@@ -89,7 +91,7 @@ libmultimedia.so
 
 如果 SDK 安装在非默认路径，请在 CMake 配置时通过 `HOBOT_ROOT` 指定。系统没有
 libyuv 或 OpenCV 开发文件时，CMake 会跳过色彩相关模块和 sample，但仍然可以构建
-硬件 resize、remap 和 codec 模块。
+硬件 resize、PIP、remap 和 codec 模块。
 
 ## Quick Start 快速开始
 
@@ -145,6 +147,7 @@ cmake --build build -j
 | `rotate_sample` | GDC 旋转 90°/180°/270° sample | GDC/VPF SDK |
 | `codec_sample` | NV12/JPEG/H.264 编解码 sample | Media Codec SDK |
 | `resize_nv12` | PYM 缩放并转 JPEG | PYM、libyuv、OpenCV |
+| `pip_nv12` | JPEG→NV12→半尺寸缩放→STITCH 画中画→JPEG | PYM、STITCH、libyuv、OpenCV |
 | `color_convert` | NV12 转 JPEG | libyuv、OpenCV |
 | `realtime_camera_pipeline` | V4L2 摄像头实时 GDC→PYM→Color/Codec | 全部模块、V4L2 DMABUF |
 | `realtime_vin_camera_pipeline` | GMSL/VIN 摄像头实时 GDC→PYM→Color/Codec | 全部模块、Camera/VIN SDK |
@@ -244,7 +247,58 @@ resize_nv12 [input.nv12 output.jpg]
 
 ---
 
-### 3. PYM 硬件裁剪
+### 3. STITCH 硬件画中画
+
+#### 功能概述
+
+`pip_nv12` 完成以下流程：
+
+1. OpenCV 加载一张 JPEG，并转换为原始尺寸 NV12 hbmem buffer；
+2. `horddt_resize` 使用 PYM 将 NV12 缩小为原宽高的一半；
+3. `horddt_pip` 使用 STITCH 的多个非重叠 `BLENDING_MODE_SRC` ROI，将原图背景
+   划分到小窗四周，并把半尺寸图像作为右上角不透明小窗，输出新的原尺寸 NV12；
+4. `horddt_color` 将合成 NV12 转成 BGR，OpenCV 写出 JPEG。
+
+STITCH 只负责硬件合成，不负责缩放；小窗尺寸必须在调用 `horddt_pip` 前通过 PYM
+或其他模块准备好。
+
+#### 默认命令
+
+```bash
+./build/pip_nv12
+```
+
+#### 默认输入输出
+
+```text
+输入：data/input_1920x1080.jpg
+中间背景：1920x1080 NV12
+中间小窗：960x540 NV12
+小窗位置：右上角，距顶部和右侧 32 像素
+输出：./pip_output.jpg
+```
+
+#### 指定输入输出
+
+```bash
+./build/pip_nv12 \
+  data/input_1920x1080.jpg \
+  output/pip.jpg
+```
+
+#### 参数格式
+
+```text
+pip_nv12 [input.jpg output.jpg]
+```
+
+输入宽高会向下裁剪到 4 的倍数，最多裁掉 3 个像素，以确保原图 NV12 和半尺寸
+NV12 的宽高、ROI 坐标均满足偶数对齐。当前封装要求 STITCH 输入 buffer 的实际
+stride 与初始化配置一致，sample 使用 64 字节对齐 stride。
+
+---
+
+### 4. PYM 硬件裁剪
 
 #### 功能概述
 
@@ -317,7 +371,7 @@ crop_nv12 [input.nv12 left.nv12 right.nv12]
 
 ---
 
-### 4. GDC 畸变矫正
+### 5. GDC 畸变矫正
 
 #### 功能概述
 
@@ -363,7 +417,7 @@ GDC bin 不只是分辨率配置，还包含镜头和标定参数。实际部署
 
 ---
 
-### 5. GDC 图像旋转
+### 6. GDC 图像旋转
 
 `rotate_sample` 使用 `horddt_rotate` 对固定为 1920x1080 的一帧 NV12 图像执行
 90°、180°或 270°硬件旋转。旋转配置在初始化时动态生成，不需要外部 GDC bin；
@@ -402,7 +456,7 @@ rotate_sample [input.nv12 output.nv12 angle]
 
 ---
 
-### 6. 硬件编解码
+### 7. 硬件编解码
 
 #### 功能概述
 
@@ -451,7 +505,7 @@ codec_sample [input.nv12 input.jpg output_dir]
 
 ---
 
-### 7. 实时摄像头零中间拷贝流水线
+### 8. 实时摄像头零中间拷贝流水线
 
 `realtime_camera_pipeline` 使用 V4L2 的 `V4L2_MEMORY_DMABUF`，让摄像头直接写入
 预分配的 `hb_mem_graphic_buf_t`。一帧数据按如下顺序处理：
@@ -531,7 +585,7 @@ buffer。相比把 borrowed 指针直接放入异步队列，这种方式不会�
 验证 `external_frame_buf`/物理地址导入；项目没有在未知 SDK ABI 上强行开启该模式。
 
 
-### 8. autocube_media Camera/VIN 实时流水线
+### 9. autocube_media Camera/VIN 实时流水线
 
 `realtime_vin_camera_pipeline` 是第二种实时相机入口。它参考
 `autocube_media/autocube_gstcamera/src/stereo_camera_reader.cpp`，不经过
@@ -693,7 +747,35 @@ resizer.resize_borrowed(input_nv12_buffer,
 `enable_file_io=false` 可取消实时场景不需要的内部文件输入 buffer；
 `enable_extra_layers=false` 只启用到目标 channel 所需的金字塔层。
 
-### 2. PYM Crop API
+### 2. STITCH PIP API
+
+```cpp
+#include "horddt_pip.hpp"
+
+horddt_pip::config cfg;
+cfg.background_width = 1920;
+cfg.background_height = 1080;
+cfg.overlay_width = 960;
+cfg.overlay_height = 540;
+cfg.overlay_x = 928;
+cfg.overlay_y = 32;
+cfg.background_stride = 1920;
+cfg.overlay_stride = 960;
+cfg.output_stride = 1920;
+
+horddt_pip pip(cfg);
+int ret = pip.compose(background_nv12, overlay_nv12, output_nv12);
+```
+
+`compose()` 将 STITCH 内部输出复制到调用方 buffer；实时链路可使用
+`compose_borrowed()` 在 callback 内直接消费 STITCH-owned buffer。两个输入和输出均为
+NV12，尺寸、坐标必须为偶数，输入/输出实际 stride 必须与配置一致。当前实现使用
+STITCH 外部 buffer 回灌模式（`mode=0`），背景 ROI 与小窗 ROI 均为 Src Copy。
+提交一帧时先使用 `hbn_vnode_sendframe_async()` 提交小窗通道 1，再使用
+`hbn_vnode_sendframe()` 提交背景通道 0 触发硬件处理，与官方
+`sample_gdc_stitch` 的多输入提交顺序一致。
+
+### 3. PYM Crop API
 
 ```cpp
 horddt_crop::config cfg;
@@ -718,7 +800,7 @@ int ret = cropper.crop_borrowed(input_nv12_buffer,
 传入调用方 output buffer 的 `crop()` 会执行逐行复制，文件接口则将 stride 输出写成
 紧凑 NV12 文件。
 
-### 3. GDC Remap API
+### 4. GDC Remap API
 
 ```cpp
 horddt_remap::config cfg;
@@ -744,7 +826,7 @@ stride 拷贝结果；实时流水线可改用 `remap_borrowed()`，在 GDC 内�
 下游。`sync_input_for_device=false` 仅适用于输入刚由 DMA 硬件产生且 CPU 未修改的情况；
 `sync_borrowed_output_for_cpu=false` 仅适用于下游仍是硬件消费者。
 
-### 4. GDC Rotate API
+### 5. GDC Rotate API
 
 ```cpp
 horddt_rotate::config cfg;
@@ -761,7 +843,7 @@ int ret = rotator.rotate(input_nv12_buffer, output_nv12_buffer);
 90°和 270°会交换输出宽高，可通过 `output_width()` 和 `output_height()` 查询。
 实时流水线可使用 `rotate_borrowed()`，在 GDC 输出 buffer 释放前直接执行下游处理。
 
-### 5. Color Convert API
+### 6. Color Convert API
 
 ```cpp
 horddt_color color_converter;
@@ -787,7 +869,7 @@ NV21 -> RGB
 如果输入由 VIO、VSE、GDC 或 Codec 等硬件模块写入，调用者应在转换前完成必要的
 cache 同步。
 
-### 6. Codec API
+### 7. Codec API
 
 ```cpp
 horddt_codec::config cfg;
@@ -795,6 +877,8 @@ cfg.width = 1920;
 cfg.height = 1080;
 cfg.frame_rate = 30;
 cfg.bit_rate = 8192;
+cfg.h264_vbv_buffer_size = 20;  // 低码率/高质量场景可适当增大
+cfg.h264_mb_level_rc_enable = true;
 cfg.jpeg_quality = 90;
 cfg.timeout_ms = 2000;
 
