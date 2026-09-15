@@ -49,7 +49,8 @@
 - CMake `3.10` 或更高版本；
 - 支持 C++14 的编译器；
 - D-Robotics multimedia SDK；
-- `horddt_color`、`resize_nv12`、`color_convert` 需要 libyuv 和 OpenCV。
+- `horddt_color`、`resize_nv12`、`color_convert`、`pip_nv12` 需要 libyuv 和 OpenCV；
+- `horddt_pip` 需要目标 SDK 提供 STITCH vnode 和 `hbn_sth_cfg.h`。
 
 ### D-Robotics SDK 依赖
 
@@ -260,11 +261,13 @@ resize_nv12 [input.nv12 output.jpg]
 4. `horddt_color` 将合成 NV12 转成 BGR，OpenCV 写出 JPEG。
 
 STITCH 只负责硬件合成，不负责缩放；小窗尺寸必须在调用 `horddt_pip` 前通过 PYM
-或其他模块准备好。
+或其他模块准备好。实现已依据 D-Robotics 官方 `sample_gdc_stitch` 校正，使用
+`hbn_sth_cfg.h` 中的 STITCH 配置结构。
 
 #### 默认命令
 
 ```bash
+cmake --build build -j --target pip_nv12
 ./build/pip_nv12
 ```
 
@@ -293,8 +296,22 @@ pip_nv12 [input.jpg output.jpg]
 ```
 
 输入宽高会向下裁剪到 4 的倍数，最多裁掉 3 个像素，以确保原图 NV12 和半尺寸
-NV12 的宽高、ROI 坐标均满足偶数对齐。当前封装要求 STITCH 输入 buffer 的实际
-stride 与初始化配置一致，sample 使用 64 字节对齐 stride。
+NV12 的宽高、ROI 坐标均满足偶数对齐。PYM 单层缩放比例范围是 `(1/2, 1]`；请求精确
+二分之一时，`horddt_resize` 会选择下一层 BL，并以该层的 `1.0` 比例输出，避免把
+`1/2` 直接配置到同一 SRC/BL 层而被硬件拒绝。
+
+当前封装要求 STITCH 输入 buffer 的实际 stride 与初始化配置一致，sample 使用 64 字节
+对齐 stride。STITCH 的主要约束如下：
+
+- 背景、输出尺寸不超过 `4096x4096`；
+- 单个 ROI 的宽和高不超过 `2000`；
+- 最多配置 `MAX_STH_ROI_NUMS` 个 ROI，当前 SDK 通常为 12；
+- NV12 宽高、小窗坐标以及 ROI 宽高均必须为偶数；
+- 小窗必须完全位于背景范围内。
+
+为避免依赖重叠 ROI 的覆盖顺序，`horddt_pip` 会把背景划分为小窗上、下、左、右的
+非重叠区域；超过 `2000x2000` 的背景区域还会继续切成 tile，最后再加入一个小窗 ROI。
+如果最终 ROI 数量超过 SDK 上限，初始化会直接失败并打印错误。
 
 ---
 
@@ -769,11 +786,25 @@ int ret = pip.compose(background_nv12, overlay_nv12, output_nv12);
 
 `compose()` 将 STITCH 内部输出复制到调用方 buffer；实时链路可使用
 `compose_borrowed()` 在 callback 内直接消费 STITCH-owned buffer。两个输入和输出均为
-NV12，尺寸、坐标必须为偶数，输入/输出实际 stride 必须与配置一致。当前实现使用
-STITCH 外部 buffer 回灌模式（`mode=0`），背景 ROI 与小窗 ROI 均为 Src Copy。
-提交一帧时先使用 `hbn_vnode_sendframe_async()` 提交小窗通道 1，再使用
-`hbn_vnode_sendframe()` 提交背景通道 0 触发硬件处理，与官方
-`sample_gdc_stitch` 的多输入提交顺序一致。
+NV12，尺寸、坐标必须为偶数，输入/输出实际 stride 必须与配置一致。调用方拥有输入和
+复制式输出 buffer；借用输出只在 callback 执行期间有效，不能保存或释放。
+
+当前实现与官方 `sample_gdc_stitch` 保持以下关键行为一致：
+
+```text
+hbn_vnode_open(HB_STITCH, 0, -1, ...)
+base_attr.mode = 0
+base_attr.img_nums = 2
+输入通道 ROI：设置 roi_index/roi_x/roi_y，roi_w=0、roi_h=0
+输出通道 ROI：设置完整 roi_index/roi_x/roi_y/roi_w/roi_h
+channel 1: hbn_vnode_sendframe_async()   # 先提交小窗
+channel 0: hbn_vnode_sendframe()         # 最后提交背景并触发处理
+hbn_vnode_getframe()
+hbn_vnode_releaseframe()
+```
+
+背景 ROI 与小窗 ROI 均使用不透明 Src Copy（官方配置中的 `blending_mode=3`）。这里不需要
+官方全景拼接案例使用的 alpha/beta LUT，因为画中画不执行渐变融合。
 
 ### 3. PYM Crop API
 
@@ -920,6 +951,7 @@ horddt_cv/
     │   ├── yx_s397_6010_sensor.c
     │   └── yx_s397_6010_sensor.h
     ├── crop_nv12_sample.cpp
+    ├── pip_nv12_sample.cpp
     ├── gdc_1920x1080.bin
     ├── realtime_camera_pipeline.cpp
     ├── remap_nv12_sample.cpp
@@ -952,6 +984,28 @@ multimedia_samples/sample_pym/sample_pym.c
 实现复用 PYM M2M 生命周期，并通过 `ds_roi_sel[]`、`ds_roi_en` 和
 `ds_roi_info[]` 配置多路 SRC ROI。输出使用 `hbn_vnode_getframe_group()` 一次获取，
 借用接口在 callback 返回后统一调用 `hbn_vnode_releaseframe_group()` 归还硬件 buffer。
+
+## STITCH PIP 实现参考
+
+`horddt_pip` 已对照 D-Robotics 官方 `sample_gdc_stitch`：
+
+```text
+../sample_gdc_stitch/sample_gdc_stitch.c
+../sample_gdc_stitch/utils.h
+../sample_gdc_stitch/stitch_config.json
+```
+
+官方案例使用 `hbn_sth_cfg.h`，并通过 `stitch_base_attr`、`stitch_ch_attr`、`roi_info`
+和 `blending_attr` 配置 STITCH。多输入帧不能依次全部使用同步接口提交；必须先按高编号
+通道异步入队，最后同步提交通道 0 触发一组图像的处理。双输入画中画对应：
+
+```cpp
+hbn_vnode_sendframe_async(stitch, 1, &overlay);
+hbn_vnode_sendframe(stitch, 0, &background);
+```
+
+官方案例包含渐变融合 ROI，因此会加载 alpha LUT；`horddt_pip` 当前只做不透明覆盖，使用
+互不重叠的 Src Copy ROI，不需要 LUT 文件。
 
 ## GDC 实现参考
 
@@ -987,7 +1041,7 @@ cmake -S . -B build -DHOBOT_ROOT=/path/to/hobot
 
 SDK 根目录通常应包含 `include/` 和 `lib/` 子目录。
 
-### 2. CMake 跳过 `color_convert` 或 `resize_nv12`
+### 2. CMake 跳过 `color_convert`、`resize_nv12` 或 `pip_nv12`
 
 这通常表示缺少 libyuv、OpenCV 头文件或对应库文件。检查：
 
@@ -1018,7 +1072,26 @@ cd horddt_cv
 ./build/color_convert /path/to/input.nv12 /path/to/output.jpg
 ```
 
-### 4. GDC 初始化失败或输出结果异常
+### 4. `horddt_pip` 编译或初始化失败
+
+首先检查目标 SDK 是否包含：
+
+```text
+/usr/hobot/include/hbn_sth_cfg.h
+/usr/hobot/include/hbn_vpf_interface.h
+/usr/hobot/include/hbn_vpf_data_info.h
+/usr/hobot/include/hb_mem_mgr.h
+/usr/hobot/lib/libvpf.so
+/usr/hobot/lib/libvio.so
+/usr/hobot/lib/libcam.so
+/usr/hobot/lib/libhbmem.so
+```
+
+如果 SDK 位于其他位置，请设置 `HOBOT_ROOT`。如果初始化阶段报 ROI 参数错误，重点检查
+尺寸和坐标是否为偶数、stride 是否至少覆盖 width 且满足 16 字节对齐，以及布局拆分后
+是否超过 `MAX_STH_ROI_NUMS`。
+
+### 5. GDC 初始化失败或输出结果异常
 
 检查以下项目：
 
@@ -1028,7 +1101,7 @@ cd horddt_cv
 - 输入输出 stride 是否满足 SDK 要求；
 - 当前硬件是否支持对应的 GDC 配置。
 
-### 5. 输出目录不存在
+### 6. 输出目录不存在
 
 包括 `crop_nv12` 在内的 sample 不会自动创建输出目录。以下命令中的
 `output/crop_left.nv12` 和 `output/crop_right.nv12` 只有在 `output/` 已存在时才能打开：
@@ -1056,6 +1129,7 @@ mkdir -p output
 
 - [头文件接口](./include)
   - [Resize API](./include/horddt_resize.hpp)
+  - [PIP API](./include/horddt_pip.hpp)
   - [Crop API](./include/horddt_crop.hpp)
   - [Remap API](./include/horddt_remap.hpp)
   - [Color API](./include/horddt_color.hpp)
